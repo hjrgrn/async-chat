@@ -1,6 +1,7 @@
 use crate::globals::{HANDSHAKE_TIMEOUT, LIST, TIMEOUT};
 use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::server_lib::OutputMsg;
+use anyhow::anyhow;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -111,34 +112,32 @@ async fn send_messages(
 /// - `Option<(String, mpsc::Receiver<IdRecordConnHandler>, mpsc::Receiver<CommandFromIdRecord>)>`: the nickname of the client, the
 /// receiver that will be used to receive messages from `id_record`, the channel that will be used
 /// to receive commands from `id_record`
-/// TODO: change Option with Result
+/// TODO: graceful shutdown
 pub async fn handshake_wrapper(
     stream: &mut TcpStream,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     addr: &SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
-) -> Option<(
-    String,
-    mpsc::Receiver<IdRecordConnHandler>,
-    mpsc::Receiver<CommandFromIdRecord>,
-)> {
+) -> Result<
+    (
+        String,
+        mpsc::Receiver<IdRecordConnHandler>,
+        mpsc::Receiver<CommandFromIdRecord>,
+    ),
+    anyhow::Error,
+> {
     // Handshake
     tokio::select! {
         // getting the nickname
         res = handshake(stream, addr.clone(), &id_tx, output_tx) => {
-            match res {
-                Some(c) => {
-                    return Some(c);
-                }
-                None => { return None; }
-            }
+            return res;
         }
         // timer
         _ = time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT)) => {
             let mut buffer = BufWriter::new(stream);
             let _ = buffer.write_all(TIMEOUT.as_bytes()).await;
             let _ = buffer.flush();
-            return None;
+            return Err(anyhow!("Handshake failed becouse timeout has been reached."));
         }
     }
 }
@@ -245,7 +244,7 @@ async fn read_branch_n(
             } else {
                 // regular message
                 *line = format!("{}: {}", nick, line);
-                output_tx.send(OutputMsg::new(line)).await.unwrap();
+                output_tx.send(OutputMsg::new(&line)).await.unwrap();
                 // send the line to the branch that communicates
                 // with the clinet
                 let msg = Message::Broadcast {

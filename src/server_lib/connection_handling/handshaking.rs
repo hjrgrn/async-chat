@@ -9,6 +9,8 @@ use crate::globals::{
 };
 use crate::server_lib::structs::CommandFromIdRecord;
 use crate::server_lib::OutputMsg;
+use anyhow::anyhow;
+use std::io;
 use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::tcp::WriteHalf;
@@ -36,17 +38,20 @@ use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler}
 ///
 /// `Option<(String, mpsc::Receiver<IdRecordConnHandler>, mpsc::Receiver<CommandFromIdRecord>)>`: client name, channel for receiving
 /// messages from `id_record` and channle for receiving commands from `id_record`
-/// TODO: Result instead of Option, error handling, custom error, error propagation
+/// TODO: error handling, custom error, error propagation
 pub async fn handshake(
     stream: &mut TcpStream,
     addr: SocketAddr,
     int_com_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: &mpsc::Sender<OutputMsg>,
-) -> Option<(
-    String,
-    mpsc::Receiver<IdRecordConnHandler>,
-    mpsc::Receiver<CommandFromIdRecord>,
-)> {
+) -> Result<
+    (
+        String,
+        mpsc::Receiver<IdRecordConnHandler>,
+        mpsc::Receiver<CommandFromIdRecord>,
+    ),
+    anyhow::Error,
+> {
     let (mut read, mut write) = stream.split();
     let mut reader = BufReader::new(&mut read);
     let mut writer = BufWriter::new(&mut write);
@@ -60,28 +65,22 @@ pub async fn handshake(
         counter += 1;
 
         if counter > MAX_TRIES {
-            let _ = notification(TOO_MANY_TRIES, &mut writer).await;
-            return None;
+            notification(TOO_MANY_TRIES, &mut writer).await?;
+            return Err(anyhow!("User have tried to register too many times without success"));
         }
 
         match reader.read_line(&mut nick).await {
             Ok(0) => {
-                return None;
+                return Err(anyhow!("Stream has reached EOF"))
             }
             Ok(_) => {
                 nick = String::from(nick.trim());
                 let len = nick.len();
                 if len > MAX_LEN {
-                    let success = notification(TOO_LONG, &mut writer).await;
-                    if !success {
-                        return None;
-                    }
+                    notification(TOO_LONG, &mut writer).await?;
                     continue;
                 } else if len < 3 {
-                    let success = notification(TOO_SHORT, &mut writer).await;
-                    if !success {
-                        return None;
-                    }
+                    notification(TOO_SHORT, &mut writer).await?;
                     continue;
                 } else {
                     (command_tx, command_rx) = mpsc::channel::<CommandFromIdRecord>(10);
@@ -93,18 +92,12 @@ pub async fn handshake(
                     match accepted {
                         IdRecordConnHandler::Acceptance(res) => {
                             if res {
-                                let success = notification(CONNECTION_ACCEPTED, &mut writer).await;
-                                if !success {
-                                    return None;
-                                }
+                                notification(CONNECTION_ACCEPTED, &mut writer).await?;
                                 let p = format!("{} has been accepted as {}\n", addr, nick);
                                 output_tx.send(OutputMsg::new(&p)).await.unwrap();
                                 break;
                             } else {
-                                let success = notification(TAKEN, &mut writer).await;
-                                if !success {
-                                    return None;
-                                }
+                                notification(TAKEN, &mut writer).await?;
                                 continue;
                             }
                         }
@@ -113,37 +106,20 @@ pub async fn handshake(
                 }
             }
             Err(_) => {
-                let success = notification(INVALID_UTF8, &mut writer).await;
-                if !success {
-                    return None;
-                }
+                notification(INVALID_UTF8, &mut writer).await?;
                 continue;
             }
         }
     }
 
-    Some((nick, req_rx, command_rx))
+    Ok((nick, req_rx, command_rx))
 }
 
-/// # connection_handler's helper notification
+/// # `handshake`'s helper `notification`
 ///
 /// Write a message to the client through the tcp stream.
-///
-/// Returns `false` if the connection dropped
-/// TODO: Result instead of bool
-async fn notification(msg: &str, writer: &mut BufWriter<&mut WriteHalf<'_>>) -> bool {
-    match writer.write_all(msg.as_bytes()).await {
-        Ok(_) => {}
-        Err(_) => {
-            return false;
-        }
-    }
-    match writer.flush().await {
-        Ok(_) => {}
-        Err(_) => {
-            return false;
-        }
-    }
-
-    return true;
+async fn notification(msg: &str, writer: &mut BufWriter<&mut WriteHalf<'_>>) -> io::Result<()> {
+    writer.write_all(msg.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
 }

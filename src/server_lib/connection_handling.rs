@@ -37,12 +37,13 @@ pub async fn connection_handler(
     let nick;
 
     match handshake_wrapper(&mut stream, &id_tx, &addr, &output_tx).await {
-        Some((n, i, c)) => {
+        Ok((n, i, c)) => {
             nick = n;
             id_hand_rx = i;
             command_rx = c;
         }
-        None => {
+        Err(e) => {
+            tracing::info!("{}", e);
             return;
         }
     }
