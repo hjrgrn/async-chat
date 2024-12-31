@@ -8,6 +8,7 @@ pub const HANDSHAKE_TIMEOUT: u64 = 20;
 // handshake protocols tokens sent from the server to the client
 pub const INVALID_UTF8: &'static str = "$INVALID_UTF8\n";
 pub const CONNECTION_ACCEPTED: &'static str = "$OK\n";
+pub const MALFORMED_PACKET: &'static str = "$MALFORMED_PACKET\n";
 pub const TOO_MANY_TRIES: &'static str = "$TOO_MANY_TRIES\n";
 pub const TOO_LONG: &'static str = "$TOO_LONG\n";
 pub const TOO_SHORT: &'static str = "$TOO_SHORT\n";

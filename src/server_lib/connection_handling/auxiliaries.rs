@@ -1,8 +1,9 @@
 use crate::globals::{HANDSHAKE_TIMEOUT, LIST, TIMEOUT};
 use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::server_lib::OutputMsg;
+use crate::shared_lib::socket_handling::{RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
-use std::error::Error;
+use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -29,7 +30,7 @@ use crate::server_lib::connection_handling::handshaking::handshake;
 /// - `addr`: address of the client that dropped
 /// - `output_tx`: channel to output on the server side
 /// TODO: graceful shutdown
-async fn connection_dropped<T: Error>(
+async fn connection_dropped<T: Display>(
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     err: Option<T>,
     addr: SocketAddr,
@@ -66,36 +67,35 @@ async fn connection_dropped<T: Error>(
 ///
 /// `bool`: if `true` the caller needs to keep going with the loop, if `false` it needs to stop the
 /// loop.
-/// TODO: Result instead of bool, error handling/propagation, graceful shutdonw
-async fn send_messages(
-    content: &str,
-    addr: &SocketAddr,
-    writer: &mut BufWriter<&mut WriteHalf<'_>>,
-    id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
-    output_tx: &mpsc::Sender<OutputMsg>,
-) -> bool {
-    let mut keep_going = true;
-
-    match writer.write_all(content.as_bytes()).await {
-        Ok(_) => {}
-        Err(err) => {
-            // connection has dropped
-            connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
-            keep_going = false;
-        }
-    }
-    // without this procedure not all bytes of the buffer may be transmitted
-    match writer.flush().await {
-        Ok(_) => {}
-        Err(err) => {
-            // connection has dropped
-            connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
-            keep_going = false;
-        }
-    }
-
-    keep_going
-}
+/// TODO: eliminate
+// async fn send_messages(
+//     content: &str,
+//     addr: &SocketAddr,
+//     writer: &mut BufWriter<&mut WriteHalf<'_>>,
+//     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
+//     output_tx: &mpsc::Sender<OutputMsg>,
+// ) -> Result<(), anyhow::Error> {
+//     match writer.write_all(content.as_bytes()).await {
+//         Ok(_) => {}
+//         Err(err) => {
+//             // connection has dropped
+//             let e = err.to_string();
+//             connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
+//             return Err(anyhow::anyhow!(e));
+//         }
+//     }
+//     // without this procedure not all bytes of the buffer may be transmitted
+//     match writer.flush().await {
+//         Ok(_) => {}
+//         Err(err) => {
+//             // connection has dropped
+//             let e = err.to_string();
+//             connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
+//             return Err(anyhow::anyhow!(e));
+//         }
+//     }
+//     Ok(())
+// }
 
 /// # `connection_handler`'s helper
 ///
@@ -145,9 +145,8 @@ pub async fn handshake_wrapper(
 /// # `connection_handler`'s helper
 ///
 /// Envelops the logic of the read branch of `connection_handler`'s main loop, reads from the
-/// clinet corresponding to the specific `connection_handler`, if false is returned
-/// the outer loop needs to be broken.
-///
+/// client corresponding to the specific `connection_handler`.
+/// ///
 /// # Parameters
 ///
 /// - `bytes`: result from reading the line that arrives from the client from the tcp stream
@@ -158,9 +157,9 @@ pub async fn handshake_wrapper(
 /// - `int_com_tx`: internal communication channel used to send
 /// - `nick`: nickname of the client
 /// - `output_tx`: communicates eventual outputs
-/// TODO: result instead of a bool, error handling, error propagation, graceful shutdonw
+/// TODO: error handling, error propagation, graceful shutdonw
 pub async fn read_branch(
-    bytes: Result<usize, std::io::Error>,
+    bytes: Result<usize, RecvHandlerError>,
     line: &mut String,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     addr: &SocketAddr,
@@ -168,33 +167,31 @@ pub async fn read_branch(
     int_com_tx: &broadcast::Sender<Message>,
     nick: &str,
     output_tx: mpsc::Sender<OutputMsg>,
-) -> bool {
+) -> Result<usize, RecvHandlerError> {
+    let res;
     match bytes {
-        Ok(0) => {
-            // connection has been closed by the client
-            // NOTE: it's a generic error, used so that I can use `None`, waiting for `anyhow`
-            let err: Option<RecvError> = None;
-            connection_dropped(&id_tx, err, addr.clone(), &output_tx).await;
-
-            return false;
-        }
-        Ok(_) => {
+        Ok(n) => {
             read_branch_n(line, id_tx, id_hand_rx, int_com_tx, addr, nick, &output_tx).await;
+            res = Ok(n);
         }
         Err(err) => {
-            // send the line to the branch that communicates
-            // with the clinet
-            let msg = Message::Broadcast {
-                content: line.clone(),
-                address: addr.clone(),
-            };
-            int_com_tx.send(msg).unwrap();
-            connection_dropped(&id_tx, Some(err), addr.clone(), &output_tx).await;
-            return false;
+            match err {
+                // TODO: there may be something wrong here
+                RecvHandlerError::ConnectionInterrupted => {
+                    // connection has been closed by the client
+                    let e: Option<RecvHandlerError> = None;
+                    connection_dropped(&id_tx, e, addr.clone(), &output_tx).await;
+                    res = Err(err);
+                }
+                RecvHandlerError::MalformedPacket(_) | RecvHandlerError::IoError(_) => {
+                    connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx).await;
+                    res = Err(err);
+                }
+            }
         }
     }
-
-    true
+    line.clear();
+    res
 }
 
 /// # `read_branch`'s helper
@@ -211,7 +208,7 @@ pub async fn read_branch(
 /// - `nick`: nickname of the client
 /// TODO: graceful shutdown
 async fn read_branch_n(
-    line: &mut String,
+    line: &str,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     id_hand_rx: &mut mpsc::Receiver<IdRecordConnHandler>,
     int_com_tx: &broadcast::Sender<Message>,
@@ -243,16 +240,15 @@ async fn read_branch_n(
                 }
             } else {
                 // regular message
-                *line = format!("{}: {}", nick, line);
-                output_tx.send(OutputMsg::new(&line)).await.unwrap();
+                let msg = format!("{}: {}", nick, line);
+                output_tx.send(OutputMsg::new(&msg)).await.unwrap();
                 // send the line to the branch that communicates
                 // with the clinet
                 let msg = Message::Broadcast {
-                    content: line.clone(),
+                    content: msg,
                     address: addr.clone(),
                 };
                 int_com_tx.send(msg).unwrap();
-                line.clear();
             }
         }
         None => {}
@@ -261,8 +257,8 @@ async fn read_branch_n(
 
 /// # `connection_handler`'s helper
 ///
-/// Envelops the logic of the write barnch of `connection_handler`'s main loop, if `false` is
-/// returned the outer loop have to be ended.
+/// Envelops the logic of the write barnch of `connection_handler`'s main loop, if Err is
+/// returned the outer loop has to be ended.
 ///
 /// ## Parameters
 /// - `res`: `Option` returned from the internal communication channel
@@ -272,30 +268,37 @@ async fn read_branch_n(
 /// - `id_tx`: channel used to send messages to `id_record`
 /// - `line`: line about to be transmitted to the client
 /// - `output_tx`: communicates eventual outputs with third parties
-///
-/// ## Returns
-/// `bool`: keep going or not
-///
-/// TODO: Result instead of bool, error handling/propagation, graceful shutdonw
+/// TODO: error handling/propagation, graceful shutdonw
 pub async fn write_branch(
     res: Result<Message, RecvError>,
     addr: &SocketAddr,
     writer: &mut BufWriter<&mut WriteHalf<'_>>,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
-) -> bool {
-    let mut keep_going = true;
-
+) -> Result<(), anyhow::Error> {
+    let mut write_handler = WriteHandler::new();
     match res {
         Ok(msg) => match msg {
             Message::Broadcast { content, address } => {
                 if address != *addr {
-                    keep_going = send_messages(&content, addr, writer, id_tx, &output_tx).await;
+                    match write_handler.write(&content, writer).await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx).await;
+                            return Err(e.into());
+                        }
+                    }
                 }
             }
             Message::Personal { content, address } => {
                 if address == *addr {
-                    keep_going = send_messages(&content, &addr, writer, id_tx, &output_tx).await;
+                    match write_handler.write(&content, writer).await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx).await;
+                            return Err(e.into());
+                        }
+                    }
                 }
             }
         },
@@ -303,8 +306,9 @@ pub async fn write_branch(
         // `connection_handler` has returned, so this should not happen
         Err(err) => {
             connection_dropped(&id_tx, Some(err), addr.clone(), &output_tx).await;
-            keep_going = false;
+            // TODO: better message
+            return Err(anyhow::anyhow!("Connection dropped"));
         }
     }
-    keep_going
+    Ok(())
 }

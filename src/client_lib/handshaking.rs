@@ -1,13 +1,13 @@
 use std::fmt::{Debug, Display};
 
 use std::error::Error;
-use std::{io, usize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    net::{tcp::WriteHalf, TcpStream},
-    sync::{mpsc, oneshot, oneshot::error::RecvError},
+    io::{BufReader, BufWriter},
+    net::TcpStream,
+    sync::{mpsc, oneshot},
 };
 
+use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use crate::{
     client_lib::globals::CLIENT_COM,
     globals::{CONNECTION_ACCEPTED, TAKEN, TIMEOUT, TOO_LONG, TOO_MANY_TRIES, TOO_SHORT},
@@ -25,6 +25,9 @@ pub async fn handshake(
     let mut writer = BufWriter::new(&mut writer);
     let mut response = String::new();
 
+    let mut write_handler = WriteHandler::new();
+    let mut recv_handler = RecvHandler::new();
+
     output_tx
         .send(OutputMsg::new(
             "Welcome to rust async chat!\nType your nickname:",
@@ -41,10 +44,18 @@ pub async fn handshake(
         tokio::select! {
             // reading from stdin
             nick = rx => {
-                send_nick(&mut writer, &nick, output_tx).await?;
+                match nick {
+                    Ok(n) => {
+                        write_handler.write(&n, &mut writer).await?;
+                    }
+                    Err(e) => {
+                        output_tx.send(OutputMsg::new_error(&format!("{}, Retry.", e))).await?;
+                    }
+                }
             }
             // reading the response from the server
-            r = reader.read_line(&mut response) => {
+            // r = reader.read_line(&mut response) => {
+            r = recv_handler.recv(&mut response, &mut reader) => {
                 match handles_response(output_tx, &r, &response).await {
                         Ok(keep_trying) => {
                             if keep_trying {
@@ -54,38 +65,13 @@ pub async fn handshake(
                             }
                         },
                         Err(e) => {
-                            return Err(e);
+                            return Err(e.into());
                         }
                     }
             }
         }
     }
 
-    Ok(())
-}
-
-/// # `handshake`'s helper `send_nick`
-///
-/// Sends the nickname to the server, if an error is returned
-/// the application cannot continue.
-/// TODO: error handling, gracefull shutdown
-async fn send_nick(
-    writer: &mut BufWriter<&mut WriteHalf<'_>>,
-    nick: &Result<String, RecvError>,
-    output_tx: &mut mpsc::Sender<OutputMsg>,
-) -> Result<(), Box<dyn Error>> {
-    match nick {
-        Ok(n) => {
-            writer.write_all(n.as_bytes()).await?;
-            writer.flush().await?;
-        }
-        Err(e) => {
-            // invalid UTF-8
-            output_tx
-                .send(OutputMsg::new_error(&format!("{}, Retry", e)))
-                .await?;
-        }
-    }
     Ok(())
 }
 
@@ -105,16 +91,10 @@ async fn send_nick(
 /// TODO: gracefull shutdown
 async fn handles_response(
     output_tx: &mut mpsc::Sender<OutputMsg>,
-    outcome: &io::Result<usize>,
+    outcome: &Result<usize, RecvHandlerError>,
     response: &str,
 ) -> Result<bool, Box<dyn Error>> {
     match outcome {
-        Ok(0) => {
-            output_tx
-                .send(OutputMsg::new_error("Connection reset by server."))
-                .await?;
-            return Err(Box::new(HandshakeError));
-        }
         Ok(_) => {
             if response == CONNECTION_ACCEPTED {
                 output_tx.send(OutputMsg::new(&format!("You have been accepted, type \"{}\" for displaying all the avaible commands", CLIENT_COM.trim()))).await?;
@@ -148,6 +128,16 @@ async fn handles_response(
             }
         }
         Err(e) => {
+            match e {
+                RecvHandlerError::ConnectionInterrupted => {
+                    output_tx
+                        .send(OutputMsg::new_error("Connection reset by server."))
+                        .await?;
+                    return Err(Box::new(HandshakeError));
+                }
+                _others => {}
+            }
+
             output_tx
                 .send(OutputMsg::new_error(&format!("{}", e)))
                 .await?;

@@ -3,12 +3,13 @@
 //! Set of functions relative to the handling of the incoming connections
 
 use std::net::SocketAddr;
-use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
+use tokio::io::{BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::server_lib::connection_handling::auxiliaries::{read_branch, write_branch};
 use crate::server_lib::structs::CommandFromIdRecord;
+use crate::shared_lib::socket_handling::RecvHandler;
 
 use self::auxiliaries::handshake_wrapper;
 
@@ -31,7 +32,6 @@ pub async fn connection_handler(
     let mut reader;
     let mut writer;
     let mut line = String::new();
-
     let mut id_hand_rx;
     let mut command_rx;
     let nick;
@@ -51,6 +51,8 @@ pub async fn connection_handler(
     let (mut read, mut write) = stream.split();
     reader = BufReader::new(&mut read);
     writer = BufWriter::new(&mut write);
+
+    let mut recv_handler = RecvHandler::new();
 
     loop {
         tokio::select! {
@@ -78,19 +80,35 @@ pub async fn connection_handler(
                 }
             }
             // read from the client
-            bytes = reader.read_line(&mut line) => {
-                let keep_going = read_branch(bytes, &mut line, &id_tx, &addr, &mut id_hand_rx, &int_com_tx, &nick, output_tx.clone()).await;
-                if !keep_going {
-                    break;
+            // bytes = reader.read_line(&mut line) => {
+            bytes = recv_handler.recv(&mut line, &mut reader) => {
+                match read_branch(
+                    bytes,
+                    &mut line,
+                    &id_tx,
+                    &addr,
+                    &mut id_hand_rx,
+                    &int_com_tx,
+                    &nick,
+                    output_tx.clone()
+                ).await {
+                    Ok(_) => {},
+                    Err(e) => {
+                        tracing::info!("{}", e);
+                        break;
+                    }
                 }
             }
 
             // sends content to the client
             res = int_com_rx.recv() => {
-                let keep_going = write_branch(res, &addr, &mut writer, &id_tx, output_tx.clone()).await;
-                if !keep_going {
-                    break;
-                }
+                match write_branch(res, &addr, &mut writer, &id_tx, output_tx.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::info!("{}", e);
+                        break;
+                    }
+                };
             }
         }
     }
