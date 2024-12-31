@@ -4,16 +4,15 @@
 //! `connection_handling`.
 
 use crate::globals::{
-    CONNECTION_ACCEPTED, INVALID_UTF8, MAX_LEN, MAX_TRIES, TAKEN, TOO_LONG, TOO_MANY_TRIES,
+    CONNECTION_ACCEPTED, MALFORMED_PACKET, MAX_LEN, MAX_TRIES, TAKEN, TOO_LONG, TOO_MANY_TRIES,
     TOO_SHORT,
 };
 use crate::server_lib::structs::CommandFromIdRecord;
 use crate::server_lib::OutputMsg;
+use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
-use std::io;
 use std::net::SocketAddr;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::tcp::WriteHalf;
+use tokio::io::{BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -59,28 +58,28 @@ pub async fn handshake(
     let mut counter: u8 = 0;
     let (req_tx, mut req_rx) = mpsc::channel(10);
     let (mut command_tx, mut command_rx);
+    let mut write_handler = WriteHandler::new();
+    let mut read_handler = RecvHandler::new();
 
     loop {
-        nick.clear();
         counter += 1;
 
         if counter > MAX_TRIES {
-            notification(TOO_MANY_TRIES, &mut writer).await?;
-            return Err(anyhow!("User have tried to register too many times without success"));
+            write_handler.write(TOO_MANY_TRIES, &mut writer).await?;
+            return Err(anyhow!(
+                "User have tried to register too many times without success"
+            ));
         }
 
-        match reader.read_line(&mut nick).await {
-            Ok(0) => {
-                return Err(anyhow!("Stream has reached EOF"))
-            }
+        match read_handler.recv(&mut nick, &mut reader).await {
             Ok(_) => {
                 nick = String::from(nick.trim());
                 let len = nick.len();
                 if len > MAX_LEN {
-                    notification(TOO_LONG, &mut writer).await?;
+                    write_handler.write(TOO_LONG, &mut writer).await?;
                     continue;
                 } else if len < 3 {
-                    notification(TOO_SHORT, &mut writer).await?;
+                    write_handler.write(TOO_SHORT, &mut writer).await?;
                     continue;
                 } else {
                     (command_tx, command_rx) = mpsc::channel::<CommandFromIdRecord>(10);
@@ -92,12 +91,14 @@ pub async fn handshake(
                     match accepted {
                         IdRecordConnHandler::Acceptance(res) => {
                             if res {
-                                notification(CONNECTION_ACCEPTED, &mut writer).await?;
+                                write_handler
+                                    .write(CONNECTION_ACCEPTED, &mut writer)
+                                    .await?;
                                 let p = format!("{} has been accepted as {}\n", addr, nick);
                                 output_tx.send(OutputMsg::new(&p)).await.unwrap();
                                 break;
                             } else {
-                                notification(TAKEN, &mut writer).await?;
+                                write_handler.write(TAKEN, &mut writer).await?;
                                 continue;
                             }
                         }
@@ -105,21 +106,17 @@ pub async fn handshake(
                     }
                 }
             }
-            Err(_) => {
-                notification(INVALID_UTF8, &mut writer).await?;
-                continue;
+            Err(e) => {
+                match e {
+                    RecvHandlerError::MalformedPacket(_) => {
+                        let _ = write_handler.write(MALFORMED_PACKET, &mut writer).await;
+                    }
+                    _ => {}
+                }
+                return Err(e.into());
             }
         }
     }
 
     Ok((nick, req_rx, command_rx))
-}
-
-/// # `handshake`'s helper `notification`
-///
-/// Write a message to the client through the tcp stream.
-async fn notification(msg: &str, writer: &mut BufWriter<&mut WriteHalf<'_>>) -> io::Result<()> {
-    writer.write_all(msg.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
 }

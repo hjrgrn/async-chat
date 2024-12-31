@@ -2,9 +2,8 @@ use std::collections::VecDeque;
 
 use globals::CLIENT_COM;
 use handshaking::handshake;
-use std::error::Error;
 use tokio::{
-    io::{stdin, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{stdin, AsyncBufReadExt, BufReader, BufWriter},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpStream,
@@ -16,7 +15,10 @@ use tokio::{
 use crate::{
     client_lib::{globals::COMMANDS, sending_messages::handling_stdin_input, settings::Settings},
     globals::LIST,
-    shared_lib::{OutputMsg, StdinRequest},
+    shared_lib::{
+        socket_handling::{RecvHandler, WriteHandler, WriteHandlerError},
+        OutputMsg, StdinRequest,
+    },
 };
 
 mod globals;
@@ -55,22 +57,20 @@ pub async fn run(
     let _ = recv_handle.await;
 }
 
-/// TODO: Description, error handling, graceful shutdown
+/// TODO: Description, error handling and propagation, graceful shutdown
 async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
     let mut reader = BufReader::new(reader);
+    let mut recv_handler = RecvHandler::new();
 
     let mut response = String::new();
 
     loop {
-        match reader.read_line(&mut response).await {
-            Ok(0) => {
-                break;
-            }
+        match recv_handler.recv(&mut response, &mut reader).await {
             Ok(_) => {
                 output_tx.send(OutputMsg::new(&response)).await.unwrap();
-                response.clear();
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("{}", e);
                 break;
             }
         }
@@ -181,22 +181,21 @@ impl InputMsg {
         }
     }
 
-    /// TODO: Description
+    /// TODO: Description, refactor
     /// - writer: socket that writes to the server
     /// - output_tx: channel that displays output
     pub async fn action(
         &self,
         writer: &mut BufWriter<OwnedWriteHalf>,
-    ) -> Result<(), Box<dyn Error>> {
+        write_handler: &mut WriteHandler,
+    ) -> Result<(), WriteHandlerError> {
         match self {
             InputMsg::Plain { payload } => {
-                writer.write_all(payload.as_bytes()).await?;
-                writer.flush().await?;
+                write_handler.write(&payload, writer).await?;
             }
             InputMsg::Command { payload } => match payload {
                 ClientCommand::ListUsers => {
-                    writer.write_all(LIST.as_bytes()).await?;
-                    writer.flush().await?;
+                    write_handler.write(LIST, writer).await?;
                 }
             },
         }
