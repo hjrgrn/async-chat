@@ -5,6 +5,8 @@ use std::usize;
 use anyhow::Context;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use super::auxiliaries::error_chain_fmt;
+
 pub const BUFF_SIZE: usize = 128;
 
 pub struct RecvHandler {
@@ -73,8 +75,7 @@ impl RecvHandler {
     }
 }
 
-// TODO: custom Debug showing source
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error)]
 pub enum RecvHandlerError {
     #[error("Peer closed the connection.")]
     ConnectionInterrupted,
@@ -82,6 +83,12 @@ pub enum RecvHandlerError {
     IoError(#[from] io::Error),
     #[error(transparent)]
     MalformedPacket(#[from] anyhow::Error),
+}
+
+impl Debug for RecvHandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        error_chain_fmt(self, f)
+    }
 }
 
 pub struct WriteHandler {
@@ -134,11 +141,16 @@ impl WriteHandler {
     }
 }
 
-// TODO: custom Debug showing source
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error)]
 pub enum WriteHandlerError {
     #[error(transparent)]
     IoError(#[from] io::Error),
     #[error(transparent)]
     MalformedPacket(#[from] anyhow::Error),
+}
+
+impl Debug for WriteHandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        error_chain_fmt(self, f)
+    }
 }

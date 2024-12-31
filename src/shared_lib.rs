@@ -5,6 +5,7 @@
 use std::fmt::{Debug, Display};
 
 use tokio::sync::{mpsc, oneshot};
+pub mod auxiliaries;
 pub mod socket_handling;
 
 /// # `display_output`
