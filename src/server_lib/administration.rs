@@ -4,11 +4,37 @@ use std::collections::VecDeque;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::select;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::globals::{COMMANDS, SERVER_COM};
 use crate::shared_lib::{OutputMsg, StdinRequest};
 
 use super::ConnHandlerIdRecordMsg;
+
+/// # `server_commands_wrapper`
+///
+/// Wrapper for `server_commands` that allows to listen for graceful shutdown call.
+///
+/// ## Parameters
+///
+/// - `comm_tx` -> sends messages to connection handlers so that messages can be sent to the clients
+/// and visualized by them
+/// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
+/// input from stdin it sends said input through this channel and `server_commands` will respont to
+/// it.
+/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
+pub async fn server_commands_wrapper(
+    comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
+    req_rx: mpsc::Receiver<StdinRequest>,
+    output_tx: mpsc::Sender<OutputMsg>,
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        _ = server_commands(comm_tx, req_rx, output_tx, ctoken.clone()) => {}
+    }
+}
 
 /// # `server_commands`
 ///
@@ -22,46 +48,75 @@ use super::ConnHandlerIdRecordMsg;
 /// The command `SERVER_COM` will be sent directly to the function that displays the output through
 /// `output_tx`.
 ///
-/// - `comm_tx` -> sends messages to connection handlers so that messages can be sent to the clients
+/// ## Parameters
+///
+/// - `comm_tx` -> sends messages to connection handler so that messages can be sent to the clients
 /// and visualized by them
 /// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
 /// input from stdin it sends said input through this channel and `server_commands` will respont to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
 /// TODO: refactor, telemetry, error handling
-pub async fn server_commands(
+async fn server_commands(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
     output_tx: mpsc::Sender<OutputMsg>,
+    ctoken: CancellationToken,
 ) {
     let mut typer = BufReader::new(stdin());
     let mut content = String::new();
 
     let mut requests: VecDeque<StdinRequest> = VecDeque::new();
 
-    output_tx
+    if output_tx
         .send(OutputMsg::new("You can start writing commands(type \"\x1b[33;1m&COMM\x1b[0m\" to list all the commands)."))
-        .await
-        .unwrap();
+        .await.is_err() {
+            // NOTE: `display_output` dropped, so ctoken should be cancelled already, but just to
+            // be safe
+            ctoken.cancel();
+            return;
+        };
 
-    loop {
+    'outer: loop {
         select! {
             res = typer.read_line(&mut content) => {
-                res.unwrap();
+                if res.is_err() {
+                    let _ = output_tx.send(OutputMsg::new_error("Unable to read from stidin.")).await;
+                    ctoken.cancel();
+                    break;
+                };
             }
             res = req_rx.recv() => {
-                requests.push_back(res.unwrap());
+                let r = match res {
+                    Some(r) => {r}
+                    None => {
+                        // all senders have been dropped
+                        let _ = output_tx
+                            .send(OutputMsg::new_error(format!(
+                                "All senders for `server_commands` has been dropped.",
+                            )))
+                            .await;
+                        ctoken.cancel();
+                        break;
+                    }
+                };
+                requests.push_back(r);
             }
         }
 
-        // Eliminates empty strings from stdin
         if content.trim().len() < 1 {
             content.clear();
         }
 
         if content.len() > 0 {
             if content == SERVER_COM {
-                output_tx.send(OutputMsg::new(COMMANDS)).await.unwrap();
+                if output_tx.send(OutputMsg::new(COMMANDS)).await.is_err() {
+                    // NOTE: `display_output` dropped, so ctoken should be cancelled already, but just to
+                    // be safe
+                    ctoken.cancel();
+                    break;
+                }
             } else {
                 loop {
                     match requests.pop_front() {
@@ -82,7 +137,12 @@ pub async fn server_commands(
                         None => {
                             // send commands
                             let msg = ConnHandlerIdRecordMsg::ServerCommand(content.clone());
-                            comm_tx.send(msg).await.unwrap();
+                            if comm_tx.send(msg).await.is_err() {
+                                // connection handlers have dropped all the receivers;
+                                // again, `.cancel` is superfluous
+                                ctoken.cancel();
+                                break 'outer;
+                            }
                         }
                     }
                     break;

@@ -21,5 +21,5 @@ cargo run
 cargo run --bin client
 ```
 
-Exemplar configuration can be found in `<root directory>/configuration/{ClientSettings.toml,ServerSettings.toml}`.
+Exemplar configuration can be found in `<ROOT_DIRECTORY>/configuration/{ClientSettings.toml,ServerSettings.toml}`.
 

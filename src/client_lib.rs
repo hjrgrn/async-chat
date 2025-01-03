@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use globals::CLIENT_COM;
 use handshaking::handshake;
+use sending_messages::handling_stdin_input_wrapper;
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader, BufWriter},
     net::{
@@ -11,9 +12,10 @@ use tokio::{
     select,
     sync::mpsc,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    client_lib::{globals::COMMANDS, sending_messages::handling_stdin_input, settings::Settings},
+    client_lib::{globals::COMMANDS, settings::Settings},
     globals::LIST,
     shared_lib::{
         socket_handling::{RecvHandler, WriteHandler, WriteHandlerError},
@@ -26,38 +28,74 @@ mod handshaking;
 mod sending_messages;
 pub mod settings;
 
+pub async fn run_wrapper(
+    settings: Settings,
+    output_tx: mpsc::Sender<OutputMsg>,
+    input_rx: mpsc::Receiver<InputMsg>,
+    stdin_req_tx: mpsc::Sender<StdinRequest>,
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        _ = run(settings, output_tx, input_rx, stdin_req_tx, ctoken.clone()) => {
+                ctoken.cancel();
+            }
+    }
+}
+
 /// TODO: comment, telemetry, error handling
-pub async fn run(
+async fn run(
     settings: Settings,
     mut output_tx: mpsc::Sender<OutputMsg>,
     input_rx: mpsc::Receiver<InputMsg>,
     mut stdin_req_tx: mpsc::Sender<StdinRequest>,
+    ctoken: CancellationToken,
 ) {
     let mut stream = match TcpStream::connect(settings.get_full_address()).await {
         Ok(s) => s,
         Err(e) => {
             let err_msg = OutputMsg::new_error(e);
-            output_tx.send(err_msg).await.unwrap();
+            let _ = output_tx.send(err_msg).await;
             return;
         }
     };
 
-    if handshake(&mut stream, &mut stdin_req_tx, &mut output_tx)
-        .await
-        .is_err()
-    {
-        return;
-    };
+    match handshake(&mut stream, &mut stdin_req_tx, &mut output_tx).await {
+        Ok(_) => {}
+        Err(e) => {
+            let _ = output_tx.send(OutputMsg::new_error(e)).await;
+            return;
+        }
+    }
 
     let (read_half, write_half) = stream.into_split();
-    let input_handle = tokio::spawn(handling_stdin_input(write_half, input_rx));
-    let recv_handle = tokio::spawn(recv_msg(read_half, output_tx));
+    let input_handle = tokio::spawn(handling_stdin_input_wrapper(
+        write_half,
+        input_rx,
+        output_tx.clone(),
+        ctoken.clone(),
+    ));
+    let recv_handle = tokio::spawn(recv_msg_wrapper(read_half, output_tx, ctoken));
 
     let _ = input_handle.await;
     let _ = recv_handle.await;
 }
 
-/// TODO: Description, error handling and propagation, graceful shutdown
+/// TODO: move this somewhere
+async fn recv_msg_wrapper(
+    reader: OwnedReadHalf,
+    output_tx: mpsc::Sender<OutputMsg>,
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        _ = recv_msg(reader, output_tx) => {
+                ctoken.cancel();
+            }
+    }
+}
+
+/// TODO: Description
 async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
     let mut reader = BufReader::new(reader);
     let mut recv_handler = RecvHandler::new();
@@ -67,13 +105,48 @@ async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
     loop {
         match recv_handler.recv(&mut response, &mut reader).await {
             Ok(_) => {
-                output_tx.send(OutputMsg::new(&response)).await.unwrap();
+                match output_tx.send(OutputMsg::new(&response)).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        break;
+                    }
+                };
             }
             Err(e) => {
-                eprintln!("{}", e);
+                let _ = output_tx.send(OutputMsg::new_error(e)).await;
                 break;
             }
         }
+    }
+}
+
+/// `client_commands`' wrapper
+///
+///
+/// ## Parameters
+///
+/// - `input_tx` -> sends user's messages and commands from stdin to the functionality that handles
+/// them.
+/// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
+/// input from stdin it sends said input through this channel and `client_command` will respond to
+/// it.
+/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
+/// - `ctoken` -> CancellationToken for graceful shutdown
+pub async fn client_commands_wrapper(
+    input_tx: mpsc::Sender<InputMsg>,
+    req_rx: mpsc::Receiver<StdinRequest>,
+    output_tx: mpsc::Sender<OutputMsg>,
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        _ = client_commands(
+                input_tx,
+                req_rx,
+                output_tx,
+            ) => {
+                ctoken.cancel();
+            }
     }
 }
 
@@ -84,7 +157,7 @@ async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
 /// input from stdin it sends said input through this channel and `client_command` will respond to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-pub async fn client_commands(
+async fn client_commands(
     input_tx: mpsc::Sender<InputMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
     output_tx: mpsc::Sender<OutputMsg>,
@@ -97,10 +170,23 @@ pub async fn client_commands(
     loop {
         select! {
             res = typer.read_line(&mut content) => {
-                res.unwrap();
+                match res {
+                    Ok(_) => {},
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e)).await;
+                        return;
+                    }
+                }
             }
             res = req_rx.recv() => {
-                requests.push_back(res.unwrap());
+                let r = match res {
+                    Some(r) => {r},
+                    None => {
+                        let _ = output_tx.send(OutputMsg::new_error("Failed to receive request for stdin in `client_commands`")).await;
+                        return;
+                    }
+                };
+                requests.push_back(r);
             }
         }
         // Eliminates empty strings from stdin
@@ -110,7 +196,12 @@ pub async fn client_commands(
 
         if content.len() > 0 {
             if content == CLIENT_COM {
-                output_tx.send(OutputMsg::new(COMMANDS)).await.unwrap();
+                match output_tx.send(OutputMsg::new(COMMANDS)).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        return;
+                    }
+                }
             } else {
                 loop {
                     // Responding to a request
@@ -134,11 +225,20 @@ pub async fn client_commands(
                             let msg = InputMsg::build(&content);
                             match msg {
                                 Ok(m) => {
-                                    input_tx.send(m).await.unwrap();
+                                    match input_tx.send(m).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            let _ = output_tx.send(OutputMsg::new_error(e)).await;
+                                            return;
+                                        }
+                                    };
                                 }
-                                Err(e) => {
-                                    output_tx.send(OutputMsg::new_error(&e)).await.unwrap();
-                                }
+                                Err(e) => match output_tx.send(OutputMsg::new_error(&e)).await {
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        return;
+                                    }
+                                },
                             }
                         }
                     }

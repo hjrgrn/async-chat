@@ -32,3 +32,5 @@ pub const COMMANDS: &'static str = "
 
 or press \x1b[33;1mCTRL + C\x1b[0m to shutdown the server.
 ";
+// general messages
+pub const EXIT_MSG: &'static str = "\nShutting down,\nSee you space cowboy...";

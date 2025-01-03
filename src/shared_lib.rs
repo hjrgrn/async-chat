@@ -5,29 +5,56 @@
 use std::fmt::{Debug, Display};
 
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+
+use crate::globals::EXIT_MSG;
 pub mod auxiliaries;
+pub mod graceful_shutdown;
 pub mod socket_handling;
 
 /// # `display_output`
 ///
 /// This function receives messages and displays them to stdout or stderr.
-/// TODO: telemetry, graceful shutdown, error handling
-pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>) {
+///
+/// ## Params
+///
+/// - `receiver` -> Cannel used to receive messages to display
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// TODO: telemetry
+pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: CancellationToken) {
     loop {
-        let msg = receiver.recv().await.unwrap();
-        match msg.payload {
-            Some(m) => {
-                println!("{}", m);
+        tokio::select! {
+            _ = ctoken.cancelled() => {
+                break;
             }
-            _ => {}
-        }
-        match msg.error {
-            Some(m) => {
-                eprintln!("{}", m);
+            res = receiver.recv() => {
+                match res {
+                    Some(msg) => {
+                        match msg.payload {
+                            Some(m) => {
+                                println!("{}", m);
+                            }
+                            _ => {}
+                        }
+                        match msg.error {
+                            Some(m) => {
+                                eprintln!("{}", m);
+                            }
+                            _ => {}
+                        }
+                    },
+                    None => {
+                        // Channel has been closed, meaning the application can't work anymore
+                        eprintln!("`display_output` can't receive messages anymore.");
+                        ctoken.cancel();
+                        break;
+                    }
+                }
             }
-            _ => {}
         }
     }
+
+    println!("{}", EXIT_MSG);
 }
 
 /// # `OutputMsg`
