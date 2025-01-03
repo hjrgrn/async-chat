@@ -7,6 +7,7 @@ use tokio::sync::{
     broadcast,
     mpsc::{self, Receiver, Sender},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::server_lib::id_record::auxiliaries::{receiving_from_hand, receiving_from_run};
 
@@ -43,6 +44,7 @@ mod auxiliaries;
 /// - `con_hand_tx` -> Sends messages from the server to the clients.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
 #[tracing::instrument(
     name = "Id record thread is running",
     skip(
@@ -51,7 +53,8 @@ mod auxiliaries;
         run_com_tx,
         con_hand_rx,
         con_hand_tx,
-        output_tx
+        output_tx,
+        ctoken
     )
 )]
 pub async fn id_record(
@@ -63,6 +66,7 @@ pub async fn id_record(
     output_tx: mpsc::Sender<OutputMsg>,
     address: SocketAddr,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
+    ctoken: CancellationToken,
 ) {
     let mut clients: Vec<Client> = Vec::new();
 
@@ -70,11 +74,41 @@ pub async fn id_record(
         tokio::select! {
             // receiving from run task
             opt = run_com_rx.recv() => {
-                receiving_from_run(&mut run_com_tx, opt, clients.len(), max_connections).await;
+                let msg = match opt {
+                    Some(m) => {m},
+                    None => {
+                        let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
+                        ctoken.cancel();
+                        break;
+                    }
+                };
+                match receiving_from_run(&mut run_com_tx, msg, clients.len(), max_connections).await {
+                Ok(()) => {}
+                Err(e) => {
+                    let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                    ctoken.cancel();
+                    break;
+                }
+            };
             }
             // receiving from a connection handler
             opt = con_hand_rx.recv() => {
-                receiving_from_hand(opt, &mut clients, &address, &con_hand_tx, &output_tx, &stdin_req_tx).await;
+                let msg = match opt {
+                    Some(m) => {m}
+                    None => {
+                        let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
+                        ctoken.cancel();
+                        break;
+                    }
+                };
+                match receiving_from_hand(msg, &mut clients, &address, &con_hand_tx, &output_tx, &stdin_req_tx).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        ctoken.cancel();
+                        break;
+                    }
+                }
             }
         }
     }

@@ -2,10 +2,12 @@
 //!
 //! Set of functions relative to the handling of the incoming connections
 
+use auxiliaries::{ReadBranchError, WriteBranchError};
 use std::net::SocketAddr;
 use tokio::io::{BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::server_lib::connection_handling::auxiliaries::{read_branch, write_branch};
 use crate::server_lib::structs::CommandFromIdRecord;
@@ -19,7 +21,38 @@ use super::OutputMsg;
 mod auxiliaries;
 mod handshaking;
 
-/// TODO: Description, error handling, error propagation
+/// `connection_handler`'s wrapper
+pub async fn connection_handler_wrapper(
+    stream: TcpStream,
+    addr: SocketAddr,
+    int_com_tx: broadcast::Sender<Message>, // internal communication
+    int_com_rx: broadcast::Receiver<Message>, // internal communication
+    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
+    output_tx: mpsc::Sender<OutputMsg>,     // Output channel
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        res = connection_handler(
+                stream,
+                addr,
+                int_com_tx,
+                int_com_rx,
+                id_tx,
+                output_tx.clone(),
+            ) => {
+            match res {
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                    ctoken.cancel();
+                }
+            }
+        }
+    }
+}
+
+/// TODO: Description , telemetry
 pub async fn connection_handler(
     mut stream: TcpStream,
     addr: SocketAddr,
@@ -27,7 +60,7 @@ pub async fn connection_handler(
     mut int_com_rx: broadcast::Receiver<Message>, // internal communication
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
     output_tx: mpsc::Sender<OutputMsg>,     // Output channel
-) {
+) -> Result<(), anyhow::Error> {
     // buffers
     let mut reader;
     let mut writer;
@@ -44,7 +77,7 @@ pub async fn connection_handler(
         }
         Err(e) => {
             tracing::info!("{}", e);
-            return;
+            return Ok(());
         }
     }
 
@@ -63,13 +96,25 @@ pub async fn connection_handler(
                         match command {
                             CommandFromIdRecord::Kick => {
                                 let msg = ConnHandlerIdRecordMsg::ClientLeft(addr.clone());
-                                id_tx.send(msg).await.unwrap();
+                                match id_tx.send(msg).await{
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                                        return Err(e.into());
+                                    }
+                                };
                                 let content = String::from("Master: You have been kicked.\n");
                                 let personal = Message::Personal {
                                     content,
                                     address: addr.clone()
                                 };
-                                let _ = int_com_tx.send(personal);
+                                match int_com_tx.send(personal) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                                        return Err(e.into());
+                                    }
+                                };
                                 break;
                             }
                         }
@@ -80,7 +125,6 @@ pub async fn connection_handler(
                 }
             }
             // read from the client
-            // bytes = reader.read_line(&mut line) => {
             bytes = recv_handler.recv(&mut line, &mut reader) => {
                 match read_branch(
                     bytes,
@@ -90,12 +134,19 @@ pub async fn connection_handler(
                     &mut id_hand_rx,
                     &int_com_tx,
                     &nick,
-                    output_tx.clone()
+                    output_tx.clone(),
                 ).await {
                     Ok(_) => {},
                     Err(e) => {
-                        tracing::info!("{}", e);
-                        break;
+                        match e {
+                            ReadBranchError::Fatal(er) => {
+                                return Err(er);
+                            }
+                            ReadBranchError::NonFatal(er) => {
+                                tracing::info!("{}", er);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -105,11 +156,19 @@ pub async fn connection_handler(
                 match write_branch(res, &addr, &mut writer, &id_tx, output_tx.clone()).await {
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::info!("{}", e);
-                        break;
+                        match e {
+                            WriteBranchError::Fatal(er) => {
+                                return Err(er);
+                            }
+                            WriteBranchError::NonFatal(er) => {
+                                tracing::info!("{}", er);
+                                break;
+                            }
+                        }
                     }
                 };
             }
         }
     }
+    Ok(())
 }

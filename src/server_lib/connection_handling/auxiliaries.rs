@@ -1,9 +1,10 @@
 use crate::globals::{HANDSHAKE_TIMEOUT, LIST, TIMEOUT};
 use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::server_lib::OutputMsg;
+use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -21,7 +22,7 @@ use crate::server_lib::connection_handling::handshaking::handshake;
 ///
 /// Helper function of `connection_handler`, this function is invoked when a client drops,
 /// if the drop incurred becouse of an error then the error will be displayed on the server.
-///
+/// If an error is returned it is fatal and the application needs to be shutdown.
 ///
 /// ## Parameters
 ///
@@ -29,25 +30,19 @@ use crate::server_lib::connection_handling::handshaking::handshake;
 /// - `err`: eventual error that needs to be communicated
 /// - `addr`: address of the client that dropped
 /// - `output_tx`: channel to output on the server side
-/// TODO: graceful shutdown
 async fn connection_dropped<T: Display>(
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     err: Option<T>,
     addr: SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
-) {
+) -> Result<(), anyhow::Error> {
     match err {
-        Some(e) => output_tx
-            .send(OutputMsg::new_error(&e.to_string()))
-            .await
-            .unwrap(),
+        Some(e) => output_tx.send(OutputMsg::new_error(&e.to_string())).await?,
         None => {}
     }
     // update id_record
-    id_tx
-        .send(ConnHandlerIdRecordMsg::ClientLeft(addr))
-        .await
-        .unwrap();
+    id_tx.send(ConnHandlerIdRecordMsg::ClientLeft(addr)).await?;
+    Ok(())
 }
 
 /// # send message
@@ -146,7 +141,10 @@ pub async fn handshake_wrapper(
 ///
 /// Envelops the logic of the read branch of `connection_handler`'s main loop, reads from the
 /// client corresponding to the specific `connection_handler`.
-/// ///
+/// If a fatal error is returned the application needs to be shutdown, if a non fatal error is
+/// returned the outer loop beeds to be broken
+///
+///
 /// # Parameters
 ///
 /// - `bytes`: result from reading the line that arrives from the client from the tcp stream
@@ -157,7 +155,8 @@ pub async fn handshake_wrapper(
 /// - `int_com_tx`: internal communication channel used to send
 /// - `nick`: nickname of the client
 /// - `output_tx`: communicates eventual outputs
-/// TODO: error handling, error propagation, graceful shutdonw
+/// - `ctoken`: cancellation token
+/// TODO: telemetry
 pub async fn read_branch(
     bytes: Result<usize, RecvHandlerError>,
     line: &mut String,
@@ -167,25 +166,28 @@ pub async fn read_branch(
     int_com_tx: &broadcast::Sender<Message>,
     nick: &str,
     output_tx: mpsc::Sender<OutputMsg>,
-) -> Result<usize, RecvHandlerError> {
+) -> Result<usize, ReadBranchError> {
     let res;
     match bytes {
         Ok(n) => {
-            read_branch_n(line, id_tx, id_hand_rx, int_com_tx, addr, nick, &output_tx).await;
+            read_branch_n(line, id_tx, id_hand_rx, int_com_tx, addr, nick, &output_tx).await?;
             res = Ok(n);
         }
         Err(err) => {
             match err {
-                // TODO: there may be something wrong here
                 RecvHandlerError::ConnectionInterrupted => {
                     // connection has been closed by the client
                     let e: Option<RecvHandlerError> = None;
-                    connection_dropped(&id_tx, e, addr.clone(), &output_tx).await;
-                    res = Err(err);
+                    connection_dropped(&id_tx, e, addr.clone(), &output_tx)
+                        .await
+                        .map_err(|e| ReadBranchError::Fatal(e))?;
+                    res = Err(ReadBranchError::NonFatal(err.into()));
                 }
                 RecvHandlerError::MalformedPacket(_) | RecvHandlerError::IoError(_) => {
-                    connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx).await;
-                    res = Err(err);
+                    connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx)
+                        .await
+                        .map_err(|e| ReadBranchError::Fatal(e))?;
+                    res = Err(ReadBranchError::NonFatal(err.into()));
                 }
             }
         }
@@ -196,7 +198,9 @@ pub async fn read_branch(
 
 /// # `read_branch`'s helper
 ///
-/// branch of code for the `Ok(n)` variant in the match of `read_branch`
+/// Branch of code for the `Ok(n)` variant in the match of `read_branch`.
+/// If an error is returned the error is fatal and the application needs to be shut down.
+///
 ///
 /// ## Parameters
 ///
@@ -206,7 +210,7 @@ pub async fn read_branch(
 /// - `int_com_tx`: sends `line` to `connection_handler`
 /// - `addr`: address of the client
 /// - `nick`: nickname of the client
-/// TODO: graceful shutdown
+/// TODO: telemetry
 async fn read_branch_n(
     line: &str,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -215,14 +219,26 @@ async fn read_branch_n(
     addr: &SocketAddr,
     nick: &str,
     output_tx: &mpsc::Sender<OutputMsg>,
-) {
+) -> Result<(), ReadBranchError> {
     match line.chars().nth(0) {
         Some(n) => {
             if n == '&' {
                 if line == LIST {
                     let req = ConnHandlerIdRecordMsg::List(addr.clone());
-                    id_tx.send(req).await.unwrap();
-                    let list = id_hand_rx.recv().await.unwrap();
+                    match id_tx.send(req).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e.to_string())));
+                        }
+                    };
+                    let list = match id_hand_rx.recv().await {
+                        Some(l) => l,
+                        None => {
+                            let e = "Failed to receive from `id_record` in `read_branch_n`";
+                            let _ = output_tx.send(OutputMsg::new_error(&e)).await;
+                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+                        }
+                    };
                     let mut content = String::new();
                     match list {
                         IdRecordConnHandler::List(s) => {
@@ -236,29 +252,48 @@ async fn read_branch_n(
                         content,
                         address: addr.clone(),
                     };
-                    int_com_tx.send(msg).unwrap();
+                    match int_com_tx.send(msg) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+                        }
+                    };
                 }
             } else {
                 // regular message
                 let msg = format!("{}: {}", nick, line);
-                output_tx.send(OutputMsg::new(&msg)).await.unwrap();
+                match output_tx.send(OutputMsg::new(&msg)).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+                    }
+                };
                 // send the line to the branch that communicates
                 // with the clinet
                 let msg = Message::Broadcast {
                     content: msg,
                     address: addr.clone(),
                 };
-                int_com_tx.send(msg).unwrap();
+                match int_com_tx.send(msg) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+                    }
+                }
             }
         }
         None => {}
     }
+
+    Ok(())
 }
 
 /// # `connection_handler`'s helper
 ///
-/// Envelops the logic of the write barnch of `connection_handler`'s main loop, if Err is
-/// returned the outer loop has to be ended.
+/// Envelops the logic of the write barnch of `connection_handler`'s main loop, if a
+/// fatal error is returned the application has to be shutdown, if a non fatal error
+/// is returned the outer loop needs to be broken.
 ///
 /// ## Parameters
 /// - `res`: `Option` returned from the internal communication channel
@@ -268,14 +303,14 @@ async fn read_branch_n(
 /// - `id_tx`: channel used to send messages to `id_record`
 /// - `line`: line about to be transmitted to the client
 /// - `output_tx`: communicates eventual outputs with third parties
-/// TODO: error handling/propagation, graceful shutdonw
+/// TODO: telemetry
 pub async fn write_branch(
     res: Result<Message, RecvError>,
     addr: &SocketAddr,
     writer: &mut BufWriter<&mut WriteHalf<'_>>,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), WriteBranchError> {
     let mut write_handler = WriteHandler::new();
     match res {
         Ok(msg) => match msg {
@@ -284,8 +319,10 @@ pub async fn write_branch(
                     match write_handler.write(&content, writer).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx).await;
-                            return Err(e.into());
+                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)
+                                .await
+                                .map_err(|e| WriteBranchError::Fatal(e))?;
+                            return Err(WriteBranchError::NonFatal(e.into()));
                         }
                     }
                 }
@@ -295,8 +332,10 @@ pub async fn write_branch(
                     match write_handler.write(&content, writer).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx).await;
-                            return Err(e.into());
+                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)
+                                .await
+                                .map_err(|e| WriteBranchError::Fatal(e))?;
+                            return Err(WriteBranchError::NonFatal(e.into()));
                         }
                     }
                 }
@@ -305,10 +344,39 @@ pub async fn write_branch(
         // `int_com_rx` and `int_com_tx` have dropped, so it means the future
         // `connection_handler` has returned, so this should not happen
         Err(err) => {
-            connection_dropped(&id_tx, Some(err), addr.clone(), &output_tx).await;
-            // TODO: better message
-            return Err(anyhow::anyhow!("Connection dropped"));
+            connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx)
+                .await
+                .map_err(|e| WriteBranchError::Fatal(e))?;
+            return Err(WriteBranchError::NonFatal(err.into()));
         }
     }
     Ok(())
+}
+
+#[derive(thiserror::Error)]
+pub enum ReadBranchError {
+    #[error(transparent)]
+    Fatal(anyhow::Error),
+    #[error(transparent)]
+    NonFatal(anyhow::Error),
+}
+
+impl Debug for ReadBranchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        error_chain_fmt(self, f)
+    }
+}
+
+#[derive(thiserror::Error)]
+pub enum WriteBranchError {
+    #[error(transparent)]
+    Fatal(anyhow::Error),
+    #[error(transparent)]
+    NonFatal(anyhow::Error),
+}
+
+impl Debug for WriteBranchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        error_chain_fmt(self, f)
+    }
 }

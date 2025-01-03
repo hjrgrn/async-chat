@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
 
+use connection_handling::connection_handler_wrapper;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::server_lib::{settings::Settings, structs::Message};
 use crate::shared_lib::{OutputMsg, StdinRequest};
 
-use self::connection_handling::connection_handler;
 use self::id_record::id_record;
 pub use self::structs::{ConnHandlerIdRecordMsg, IdRecordRunMsg, RunIdRecordMsg};
 
@@ -15,6 +16,29 @@ mod connection_handling;
 mod id_record;
 pub mod settings;
 mod structs;
+
+pub async fn run_wrapper(
+    settings: Settings,
+    con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
+    con_hand_id_rx: mpsc::Receiver<ConnHandlerIdRecordMsg>,
+    output_tx: mpsc::Sender<OutputMsg>,
+    stdin_req_tx: mpsc::Sender<StdinRequest>,
+    ctoken: CancellationToken,
+) {
+    tokio::select! {
+        _ = ctoken.cancelled() => {}
+        _ = run(
+            settings,
+            con_hand_id_tx,
+            con_hand_id_rx,
+            output_tx,
+            stdin_req_tx,
+            ctoken.clone(),
+        ) => {
+            ctoken.cancel();
+        }
+    }
+}
 
 /// # Run
 ///
@@ -33,25 +57,34 @@ mod structs;
 /// to id_record
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
-/// TODO: telemetry, error handling, graceful shutdonw
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// TODO: telemetry, error handling
 #[tracing::instrument(
     name = "Server is running",
     skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx)
 )]
-pub async fn run(
+async fn run(
     settings: Settings,
     con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     con_hand_id_rx: mpsc::Receiver<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
+    ctoken: CancellationToken,
 ) {
-    output_tx
+    if output_tx
         .send(OutputMsg::new("Listening..."))
         .await
-        .expect("Resceiver dropped.");
-    let listener = TcpListener::bind(&settings.get_full_address())
-        .await
-        .expect("Failed to bind listener.");
+        .is_err()
+    {
+        return;
+    }
+    let listener = match TcpListener::bind(&settings.get_full_address()).await {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+            return;
+        }
+    };
 
     // IdRecord
     // channels
@@ -65,10 +98,14 @@ pub async fn run(
     let (int_com_tx, _) = broadcast::channel::<Message>(10);
     let id_msg_tx1 = int_com_tx.clone();
 
-    let addr: SocketAddr = settings
-        .get_full_address()
-        .parse()
-        .expect("Failed to parse Settings.toml, this should not happen.");
+    let addr: SocketAddr = match settings.get_full_address().parse() {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+            return;
+        }
+    };
+
     tokio::spawn(id_record(
         settings.get_max_connections(),
         run_id_com_rx,
@@ -78,6 +115,7 @@ pub async fn run(
         output_tx.clone(),
         addr,
         stdin_req_tx.clone(),
+        ctoken.clone(),
     ));
 
     loop {
@@ -96,26 +134,49 @@ pub async fn run(
         };
 
         // Ask if there is space to `id_record`
-        run_id_com_tx
-            .send(RunIdRecordMsg::IsThereSpace)
-            .await
-            .unwrap();
-        let is_there_space = id_run_com_rx.recv().await.unwrap();
+        match run_id_com_tx.send(RunIdRecordMsg::IsThereSpace).await {
+            Ok(_) => {}
+            Err(e) => {
+                // NOTE: cancel should be called in `id_record`
+                let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                ctoken.cancel();
+                return;
+            }
+        }
+        let is_there_space = match id_run_com_rx.recv().await {
+            Some(i) => i,
+            None => {
+                let _ = output_tx
+                    .send(OutputMsg::new_error(
+                        "Failed to reciver from `id_record` in `run`",
+                    ))
+                    .await;
+                ctoken.cancel();
+                return;
+            }
+        };
         match is_there_space {
             IdRecordRunMsg::IsThereSpace(true) => {
-                tokio::spawn(connection_handler(
+                tokio::spawn(connection_handler_wrapper(
                     stream,
                     addr,
                     int_com_tx1,
                     int_com_rx,
                     con_hand_id_tx1,
                     output_tx.clone(),
+                    ctoken.clone(),
                 ));
             }
             _others => {
                 // TODO: maybe too much noise
                 let s = format!("Connection refused from: {}\n", addr);
-                output_tx.send(OutputMsg::new(&s)).await.unwrap();
+                match output_tx.send(OutputMsg::new(&s)).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        ctoken.cancel();
+                        return;
+                    }
+                };
             }
         }
     }

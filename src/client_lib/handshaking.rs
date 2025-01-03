@@ -19,7 +19,7 @@ pub async fn handshake(
     stream: &mut TcpStream,
     stdin_req_tx: &mut mpsc::Sender<StdinRequest>,
     output_tx: &mut mpsc::Sender<OutputMsg>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), anyhow::Error> {
     let (mut reader, mut writer) = stream.split();
     let mut reader = BufReader::new(&mut reader);
     let mut writer = BufWriter::new(&mut writer);
@@ -93,7 +93,7 @@ async fn handles_response(
     output_tx: &mut mpsc::Sender<OutputMsg>,
     outcome: &Result<usize, RecvHandlerError>,
     response: &str,
-) -> Result<bool, Box<dyn Error>> {
+) -> Result<bool, anyhow::Error> {
     match outcome {
         Ok(_) => {
             if response == CONNECTION_ACCEPTED {
@@ -103,7 +103,7 @@ async fn handles_response(
                 output_tx
                     .send(OutputMsg::new("Connection refused due to: too many tries."))
                     .await?;
-                return Err(Box::new(HandshakeError));
+                return Err(HandshakeError.into());
             } else if response == TOO_SHORT {
                 output_tx
                     .send(OutputMsg::new("The nickname you chose is to short, retry."))
@@ -116,7 +116,7 @@ async fn handles_response(
                 output_tx
                     .send(OutputMsg::new("Timeout reached, try and reconnect."))
                     .await?;
-                return Err(Box::new(HandshakeError));
+                return Err(HandshakeError.into());
             } else if response == TAKEN {
                 output_tx
                     .send(OutputMsg::new(&format!(
@@ -133,7 +133,7 @@ async fn handles_response(
                     output_tx
                         .send(OutputMsg::new_error("Connection reset by server."))
                         .await?;
-                    return Err(Box::new(HandshakeError));
+                    return Err(HandshakeError.into());
                 }
                 _others => {}
             }
@@ -142,7 +142,7 @@ async fn handles_response(
                 .send(OutputMsg::new_error(&format!("{}", e)))
                 .await?;
 
-            return Err(Box::new(HandshakeError));
+            return Err(HandshakeError.into());
         }
     }
     Ok(true)
