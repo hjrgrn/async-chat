@@ -52,14 +52,27 @@ pub async fn connection_handler_wrapper(
     }
 }
 
-/// TODO: Description , telemetry
-pub async fn connection_handler(
+/// #`connection_handler`
+///
+/// Handles a single connection.
+///
+///
+/// ## Parameters
+///
+/// - mut stream: stream between the client and the server
+/// - addr: address of the client
+/// - int_com_tx: channel for communication internale to the handler, transmitter
+/// - mut int_com_rx: channel for communication internale to the handler, receiver
+/// - id_tx: channel for communication with id_record, transmitter
+/// - output_tx: output channel
+/// TODO: telemetry
+async fn connection_handler(
     mut stream: TcpStream,
     addr: SocketAddr,
-    int_com_tx: broadcast::Sender<Message>, // internal communication
-    mut int_com_rx: broadcast::Receiver<Message>, // internal communication
-    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
-    output_tx: mpsc::Sender<OutputMsg>,     // Output channel
+    int_com_tx: broadcast::Sender<Message>,
+    mut int_com_rx: broadcast::Receiver<Message>,
+    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
+    output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     // buffers
     let mut reader;
@@ -76,8 +89,15 @@ pub async fn connection_handler(
             command_rx = c;
         }
         Err(e) => {
-            tracing::info!("{}", e);
-            return Ok(());
+            match e {
+                handshaking::HandshakeError::NonFatal(_) => {
+                    // TODO: log error
+                    return Ok(());
+                }
+                handshaking::HandshakeError::Fatal(e) => {
+                    return Err(e);
+                }
+            }
         }
     }
 
@@ -142,8 +162,8 @@ pub async fn connection_handler(
                             ReadBranchError::Fatal(er) => {
                                 return Err(er);
                             }
-                            ReadBranchError::NonFatal(er) => {
-                                tracing::info!("{}", er);
+                            ReadBranchError::NonFatal(_) => {
+                                // TODO: logging error
                                 break;
                             }
                         }
@@ -160,8 +180,8 @@ pub async fn connection_handler(
                             WriteBranchError::Fatal(er) => {
                                 return Err(er);
                             }
-                            WriteBranchError::NonFatal(er) => {
-                                tracing::info!("{}", er);
+                            WriteBranchError::NonFatal(_) => {
+                                // TODO: logging error
                                 break;
                             }
                         }

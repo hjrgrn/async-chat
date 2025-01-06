@@ -78,7 +78,6 @@ pub async fn id_record(
                     Some(m) => {m},
                     None => {
                         let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
-                        ctoken.cancel();
                         break;
                     }
                 };
@@ -86,7 +85,6 @@ pub async fn id_record(
                 Ok(()) => {}
                 Err(e) => {
                     let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                    ctoken.cancel();
                     break;
                 }
             };
@@ -97,7 +95,6 @@ pub async fn id_record(
                     Some(m) => {m}
                     None => {
                         let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
-                        ctoken.cancel();
                         break;
                     }
                 };
@@ -105,11 +102,11 @@ pub async fn id_record(
                     Ok(()) => {}
                     Err(e) => {
                         let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                        ctoken.cancel();
                         break;
                     }
                 }
             }
         }
     }
+    ctoken.cancel();
 }

@@ -1,6 +1,5 @@
 use std::fmt::{Debug, Display};
 
-use std::error::Error;
 use tokio::{
     io::{BufReader, BufWriter},
     net::TcpStream,

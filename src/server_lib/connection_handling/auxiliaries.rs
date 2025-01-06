@@ -18,6 +18,8 @@ use crate::server_lib::structs::{ConnHandlerIdRecordMsg, Message};
 
 use crate::server_lib::connection_handling::handshaking::handshake;
 
+use super::handshaking::HandshakeError;
+
 /// # connection has dropped
 ///
 /// Helper function of `connection_handler`, this function is invoked when a client drops,
@@ -45,56 +47,11 @@ async fn connection_dropped<T: Display>(
     Ok(())
 }
 
-/// # send message
-///
-/// `connection_handler`'s helper, sends the formatted message to the client.
-///
-/// ## Parameters
-///
-/// - `nick`: nickname of the creator of the message
-/// - `content`: content of the message
-/// - `addr`: address of the creator of the message
-/// - `writer`: buffer of the tcp write half
-/// - `id_tx`: channel that sends messages to `id_record`
-/// - `output_tx`: communicates eventual outputs with third parties
-///
-/// ## Returns
-///
-/// `bool`: if `true` the caller needs to keep going with the loop, if `false` it needs to stop the
-/// loop.
-/// TODO: eliminate
-// async fn send_messages(
-//     content: &str,
-//     addr: &SocketAddr,
-//     writer: &mut BufWriter<&mut WriteHalf<'_>>,
-//     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
-//     output_tx: &mpsc::Sender<OutputMsg>,
-// ) -> Result<(), anyhow::Error> {
-//     match writer.write_all(content.as_bytes()).await {
-//         Ok(_) => {}
-//         Err(err) => {
-//             // connection has dropped
-//             let e = err.to_string();
-//             connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
-//             return Err(anyhow::anyhow!(e));
-//         }
-//     }
-//     // without this procedure not all bytes of the buffer may be transmitted
-//     match writer.flush().await {
-//         Ok(_) => {}
-//         Err(err) => {
-//             // connection has dropped
-//             let e = err.to_string();
-//             connection_dropped(id_tx, Some(err), addr.clone(), output_tx).await;
-//             return Err(anyhow::anyhow!(e));
-//         }
-//     }
-//     Ok(())
-// }
 
 /// # `connection_handler`'s helper
 ///
-/// Simplyfies the code
+/// Simplyfies the code.
+/// Returns an error that may be fatal, if that is the case the application needs to shutdown.
 ///
 /// ## Parameters
 ///
@@ -104,10 +61,8 @@ async fn connection_dropped<T: Display>(
 ///
 /// ## Returns
 ///
-/// - `Option<(String, mpsc::Receiver<IdRecordConnHandler>, mpsc::Receiver<CommandFromIdRecord>)>`: the nickname of the client, the
-/// receiver that will be used to receive messages from `id_record`, the channel that will be used
+///  the nickname of the client, the receiver that will be used to receive messages from `id_record`, the channel that will be used
 /// to receive commands from `id_record`
-/// TODO: graceful shutdown
 pub async fn handshake_wrapper(
     stream: &mut TcpStream,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -119,7 +74,7 @@ pub async fn handshake_wrapper(
         mpsc::Receiver<IdRecordConnHandler>,
         mpsc::Receiver<CommandFromIdRecord>,
     ),
-    anyhow::Error,
+    HandshakeError,
 > {
     // Handshake
     tokio::select! {
@@ -132,7 +87,7 @@ pub async fn handshake_wrapper(
             let mut buffer = BufWriter::new(stream);
             let _ = buffer.write_all(TIMEOUT.as_bytes()).await;
             let _ = buffer.flush();
-            return Err(anyhow!("Handshake failed becouse timeout has been reached."));
+            return Err(HandshakeError::NonFatal(anyhow!("Handshake failed becouse timeout has been reached.")));
         }
     }
 }

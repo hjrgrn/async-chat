@@ -32,7 +32,9 @@ pub async fn server_commands_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = server_commands(comm_tx, req_rx, output_tx, ctoken.clone()) => {}
+        _ = server_commands(comm_tx, req_rx, output_tx) => {
+            ctoken.cancel();
+        }
     }
 }
 
@@ -56,13 +58,11 @@ pub async fn server_commands_wrapper(
 /// input from stdin it sends said input through this channel and `server_commands` will respont to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
-/// TODO: refactor, telemetry, error handling
+/// TODO: telemetry
 async fn server_commands(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
     output_tx: mpsc::Sender<OutputMsg>,
-    ctoken: CancellationToken,
 ) {
     let mut typer = BufReader::new(stdin());
     let mut content = String::new();
@@ -72,9 +72,6 @@ async fn server_commands(
     if output_tx
         .send(OutputMsg::new("You can start writing commands(type \"\x1b[33;1m&COMM\x1b[0m\" to list all the commands)."))
         .await.is_err() {
-            // NOTE: `display_output` dropped, so ctoken should be cancelled already, but just to
-            // be safe
-            ctoken.cancel();
             return;
         };
 
@@ -83,7 +80,6 @@ async fn server_commands(
             res = typer.read_line(&mut content) => {
                 if res.is_err() {
                     let _ = output_tx.send(OutputMsg::new_error("Unable to read from stidin.")).await;
-                    ctoken.cancel();
                     break;
                 };
             }
@@ -97,7 +93,6 @@ async fn server_commands(
                                 "All senders for `server_commands` has been dropped.",
                             )))
                             .await;
-                        ctoken.cancel();
                         break;
                     }
                 };
@@ -112,9 +107,6 @@ async fn server_commands(
         if content.len() > 0 {
             if content == SERVER_COM {
                 if output_tx.send(OutputMsg::new(COMMANDS)).await.is_err() {
-                    // NOTE: `display_output` dropped, so ctoken should be cancelled already, but just to
-                    // be safe
-                    ctoken.cancel();
                     break;
                 }
             } else {
@@ -138,9 +130,6 @@ async fn server_commands(
                             // send commands
                             let msg = ConnHandlerIdRecordMsg::ServerCommand(content.clone());
                             if comm_tx.send(msg).await.is_err() {
-                                // connection handlers have dropped all the receivers;
-                                // again, `.cancel` is superfluous
-                                ctoken.cancel();
                                 break 'outer;
                             }
                         }
