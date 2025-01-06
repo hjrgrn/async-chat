@@ -17,6 +17,20 @@ mod id_record;
 pub mod settings;
 mod structs;
 
+/// # `run`'s wrapper
+///
+/// Wrapper for `run` that allows to listen for graceful shutdown call.
+///
+///
+/// ## Parameters
+///
+/// - `con_hand_id_tx` -> sender channel used to communicate with `id_record`, the user manager: connection_handler to
+/// id_record.
+/// - `con_hand_id_rx` -> receiver channel used to communicate with id_record: connection_handler
+/// to id_record
+/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
+/// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
+/// - `ctoken` -> Cancellation token used to communicate the shutdown
 pub async fn run_wrapper(
     settings: Settings,
     con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -137,9 +151,7 @@ async fn run(
         match run_id_com_tx.send(RunIdRecordMsg::IsThereSpace).await {
             Ok(_) => {}
             Err(e) => {
-                // NOTE: cancel should be called in `id_record`
                 let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                ctoken.cancel();
                 return;
             }
         }
@@ -151,7 +163,6 @@ async fn run(
                         "Failed to reciver from `id_record` in `run`",
                     ))
                     .await;
-                ctoken.cancel();
                 return;
             }
         };
@@ -170,12 +181,8 @@ async fn run(
             _others => {
                 // TODO: maybe too much noise
                 let s = format!("Connection refused from: {}\n", addr);
-                match output_tx.send(OutputMsg::new(&s)).await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        ctoken.cancel();
-                        return;
-                    }
+                if output_tx.send(OutputMsg::new(&s)).await.is_err() {
+                    return;
                 };
             }
         }
