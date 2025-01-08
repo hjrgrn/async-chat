@@ -77,7 +77,9 @@ pub async fn id_record(
                 let msg = match opt {
                     Some(m) => {m},
                     None => {
-                        let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
+                        let msg = "id_record is unable to communicate with `run`";
+                        let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                        tracing::error!("{}", msg);
                         break;
                     }
                 };
@@ -85,6 +87,7 @@ pub async fn id_record(
                 Ok(()) => {}
                 Err(e) => {
                     let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                    tracing::error!("id_record can't work anymore:\n{:?}", e);
                     break;
                 }
             };
@@ -94,7 +97,9 @@ pub async fn id_record(
                 let msg = match opt {
                     Some(m) => {m}
                     None => {
-                        let _ = output_tx.send(OutputMsg::new_error("id_record is unable to communicate with `run`")).await;
+                        let msg = "id_record is unable to communicate with `run`";
+                        let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                        tracing::error!("{}", msg);
                         break;
                     }
                 };
@@ -102,6 +107,7 @@ pub async fn id_record(
                     Ok(()) => {}
                     Err(e) => {
                         let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        tracing::error!("id_record can't work anymore:\n{:?}", e);
                         break;
                     }
                 }

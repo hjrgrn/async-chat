@@ -20,7 +20,7 @@ pub mod socket_handling;
 ///
 /// - `receiver` -> Cannel used to receive messages to display
 /// - `ctoken` -> Cancellation token used to communicate the shutdown
-/// TODO: telemetry
+#[tracing::instrument(name = "Displaying output", skip(receiver, ctoken))]
 pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: CancellationToken) {
     loop {
         tokio::select! {
@@ -45,7 +45,7 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
                     },
                     None => {
                         // Channel has been closed, meaning the application can't work anymore
-                        eprintln!("`display_output` can't receive messages anymore.");
+                        tracing::error!("`display_output` can't receive messages anymore.");
                         ctoken.cancel();
                         break;
                     }

@@ -32,7 +32,13 @@ pub async fn server_commands_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = server_commands(comm_tx, req_rx, output_tx) => {
+        res = server_commands(comm_tx, req_rx, output_tx) => {
+            match res {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("`server_commands` can't work anymore:\n{:?}", e);
+                }
+            }
             ctoken.cancel();
         }
     }
@@ -58,22 +64,20 @@ pub async fn server_commands_wrapper(
 /// input from stdin it sends said input through this channel and `server_commands` will respont to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-/// TODO: telemetry
+#[tracing::instrument(name = "Receiving commands from user", skip(comm_tx, req_rx, output_tx))]
 async fn server_commands(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
     output_tx: mpsc::Sender<OutputMsg>,
-) {
+) -> Result<(), anyhow::Error> {
     let mut typer = BufReader::new(stdin());
     let mut content = String::new();
 
     let mut requests: VecDeque<StdinRequest> = VecDeque::new();
 
-    if output_tx
+    output_tx
         .send(OutputMsg::new("You can start writing commands(type \"\x1b[33;1m&COMM\x1b[0m\" to list all the commands)."))
-        .await.is_err() {
-            return;
-        };
+        .await?;
 
     'outer: loop {
         select! {
@@ -140,4 +144,5 @@ async fn server_commands(
             content.clear();
         }
     }
+    Ok(())
 }

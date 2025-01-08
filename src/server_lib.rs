@@ -41,7 +41,7 @@ pub async fn run_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = run(
+        res = run(
             settings,
             con_hand_id_tx,
             con_hand_id_rx,
@@ -49,6 +49,12 @@ pub async fn run_wrapper(
             stdin_req_tx,
             ctoken.clone(),
         ) => {
+            match res {
+                Ok(()) => {},
+                Err(e) => {
+                    tracing::error!("`run` can't work anymore:\n{:?}", e);
+                }
+            }
             ctoken.cancel();
         }
     }
@@ -72,7 +78,6 @@ pub async fn run_wrapper(
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
 /// - `ctoken` -> Cancellation token used to communicate the shutdown
-/// TODO: telemetry, error handling
 #[tracing::instrument(
     name = "Server is running",
     skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx)
@@ -84,19 +89,13 @@ async fn run(
     output_tx: mpsc::Sender<OutputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
-) {
-    if output_tx
-        .send(OutputMsg::new("Listening..."))
-        .await
-        .is_err()
-    {
-        return;
-    }
+) -> Result<(), anyhow::Error> {
+    output_tx.send(OutputMsg::new("Listening...")).await?;
     let listener = match TcpListener::bind(&settings.get_full_address()).await {
         Ok(l) => l,
         Err(e) => {
             let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-            return;
+            return Err(e.into());
         }
     };
 
@@ -116,7 +115,7 @@ async fn run(
         Ok(a) => a,
         Err(e) => {
             let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-            return;
+            return Err(e.into());
         }
     };
 
@@ -141,8 +140,8 @@ async fn run(
 
         let (stream, addr) = match listener.accept().await {
             Ok((s, a)) => (s, a),
-            Err(_) => {
-                // TODO: log error
+            Err(e) => {
+                tracing::info!("Error receiving a request:\n{:?}", e);
                 continue;
             }
         };
@@ -152,18 +151,15 @@ async fn run(
             Ok(_) => {}
             Err(e) => {
                 let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                return;
+                return Err(e.into());
             }
         }
         let is_there_space = match id_run_com_rx.recv().await {
             Some(i) => i,
             None => {
-                let _ = output_tx
-                    .send(OutputMsg::new_error(
-                        "Failed to reciver from `id_record` in `run`",
-                    ))
-                    .await;
-                return;
+                let msg = "Failed to reciver from `id_record` in `run`";
+                let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                return Err(anyhow::anyhow!(msg));
             }
         };
         match is_there_space {
@@ -178,12 +174,11 @@ async fn run(
                     ctoken.clone(),
                 ));
             }
-            _others => {
-                // TODO: maybe too much noise
-                let s = format!("Connection refused from: {}\n", addr);
-                if output_tx.send(OutputMsg::new(&s)).await.is_err() {
-                    return;
-                };
+            IdRecordRunMsg::IsThereSpace(false) => {
+                tracing::info!(
+                    "Connection refused from: {}\nBecouse there was no space left.",
+                    addr
+                );
             }
         }
     }
