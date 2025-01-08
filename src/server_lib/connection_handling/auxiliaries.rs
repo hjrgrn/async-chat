@@ -47,7 +47,6 @@ async fn connection_dropped<T: Display>(
     Ok(())
 }
 
-
 /// # `connection_handler`'s helper
 ///
 /// Simplyfies the code.
@@ -111,7 +110,10 @@ pub async fn handshake_wrapper(
 /// - `nick`: nickname of the client
 /// - `output_tx`: communicates eventual outputs
 /// - `ctoken`: cancellation token
-/// TODO: telemetry
+#[tracing::instrument(
+    name = "Reading from connection",
+    skip(bytes, line, id_tx, id_hand_rx, int_com_tx, nick, output_tx)
+)]
 pub async fn read_branch(
     bytes: Result<usize, RecvHandlerError>,
     line: &mut String,
@@ -165,7 +167,6 @@ pub async fn read_branch(
 /// - `int_com_tx`: sends `line` to `connection_handler`
 /// - `addr`: address of the client
 /// - `nick`: nickname of the client
-/// TODO: telemetry
 async fn read_branch_n(
     line: &str,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -194,14 +195,15 @@ async fn read_branch_n(
                             return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
                         }
                     };
-                    let mut content = String::new();
+                    let content;
                     match list {
                         IdRecordConnHandler::List(s) => {
                             content = s;
                         }
-                        _ => {
-                            // TODO: logging the unexpected behaviour
-                        } // `id_record` should always respond with a `List` variant here.
+                        _other => {
+                            // `id_record` should always respond with a `List` variant here.
+                            return Err(ReadBranchError::Fatal(anyhow::anyhow!("Unexpecte behaviour from `id_record`:\nIt responded with a non `IdRecordConnHandler::List` to a request for a list.")));
+                        }
                     };
                     let msg = Message::Personal {
                         content,
@@ -258,7 +260,7 @@ async fn read_branch_n(
 /// - `id_tx`: channel used to send messages to `id_record`
 /// - `line`: line about to be transmitted to the client
 /// - `output_tx`: communicates eventual outputs with third parties
-/// TODO: telemetry
+#[tracing::instrument(name = "Writing to connection", skip(res, writer, id_tx, output_tx))]
 pub async fn write_branch(
     res: Result<Message, RecvError>,
     addr: &SocketAddr,

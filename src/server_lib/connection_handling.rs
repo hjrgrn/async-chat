@@ -45,6 +45,7 @@ pub async fn connection_handler_wrapper(
                 Ok(_) => {}
                 Err(e) => {
                     let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                    tracing::error!("`connection_handler` can't work anymore:\n{:?}", e);
                     ctoken.cancel();
                 }
             }
@@ -65,7 +66,14 @@ pub async fn connection_handler_wrapper(
 /// - mut int_com_rx: channel for communication internale to the handler, receiver
 /// - id_tx: channel for communication with id_record, transmitter
 /// - output_tx: output channel
-/// TODO: telemetry
+#[tracing::instrument(
+    name = "Handling connection.",
+    skip(stream, addr, int_com_tx, int_com_rx, id_tx, output_tx),
+    fields(
+        username = tracing::field::Empty,
+        address = %addr
+    )
+)]
 async fn connection_handler(
     mut stream: TcpStream,
     addr: SocketAddr,
@@ -85,20 +93,23 @@ async fn connection_handler(
     match handshake_wrapper(&mut stream, &id_tx, &addr, &output_tx).await {
         Ok((n, i, c)) => {
             nick = n;
+            tracing::Span::current().record("username", &nick);
             id_hand_rx = i;
             command_rx = c;
         }
-        Err(e) => {
-            match e {
-                handshaking::HandshakeError::NonFatal(_) => {
-                    // TODO: log error
-                    return Ok(());
-                }
-                handshaking::HandshakeError::Fatal(e) => {
-                    return Err(e);
-                }
+        Err(e) => match e {
+            handshaking::HandshakeError::NonFatal(e) => {
+                tracing::info!(
+                    "Failed to complete handshake with:\naddr: {}\nBecouse of:\n{}",
+                    addr,
+                    e
+                );
+                return Ok(());
             }
-        }
+            handshaking::HandshakeError::Fatal(e) => {
+                return Err(e);
+            }
+        },
     }
 
     let (mut read, mut write) = stream.split();
@@ -162,8 +173,13 @@ async fn connection_handler(
                             ReadBranchError::Fatal(er) => {
                                 return Err(er);
                             }
-                            ReadBranchError::NonFatal(_) => {
-                                // TODO: logging error
+                            ReadBranchError::NonFatal(e) => {
+                                tracing::info!(
+                                    "Connection with:\naddr: {}\nuser: {}\nClosed becouse of:\n{}",
+                                    addr,
+                                    nick,
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -180,8 +196,13 @@ async fn connection_handler(
                             WriteBranchError::Fatal(er) => {
                                 return Err(er);
                             }
-                            WriteBranchError::NonFatal(_) => {
-                                // TODO: logging error
+                            WriteBranchError::NonFatal(e) => {
+                                tracing::info!(
+                                    "Connection with:\naddr: {}\nuser: {}\nClosed becouse of:\n{}",
+                                    addr,
+                                    nick,
+                                    e
+                                );
                                 break;
                             }
                         }
