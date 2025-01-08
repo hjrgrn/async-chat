@@ -64,7 +64,7 @@ pub async fn server_commands_wrapper(
 /// input from stdin it sends said input through this channel and `server_commands` will respont to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-#[tracing::instrument(name = "Receiving server commands", skip(comm_tx, req_rx, output_tx))]
+#[tracing::instrument(name = "Receiving commands from user", skip(comm_tx, req_rx, output_tx))]
 async fn server_commands(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,

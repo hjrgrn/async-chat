@@ -28,6 +28,9 @@ mod handshaking;
 mod sending_messages;
 pub mod settings;
 
+/// # `run`'s wrapper
+///
+/// Allows graceful shutdown to be porformed
 pub async fn run_wrapper(
     settings: Settings,
     output_tx: mpsc::Sender<OutputMsg>,
@@ -37,34 +40,56 @@ pub async fn run_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = run(settings, output_tx, input_rx, stdin_req_tx, ctoken.clone()) => {
+        res = run(settings, output_tx, input_rx, stdin_req_tx, ctoken.clone()) => {
+                match res {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("`run` can't work anymore:\n{:?}", e);
+                    }
+                }
                 ctoken.cancel();
             }
     }
 }
 
-/// TODO: comment, telemetry, error handling
+/// # `run`
+///
+/// Runs the main task of the client application.
+///
+///
+/// ## Parameters
+///
+/// settings: application settings
+/// output_tx: channel for comunicating output to be displayed
+/// input_rx: channel that receives input from the user
+/// stdin_req_tx: channel for requesting informations from stdin
+/// ctoken: cancellation token
+/// TODO: move this somewhere else
+#[tracing::instrument(
+    name = "Client main task is running",
+    skip(settings, output_tx, input_rx, stdin_req_tx, ctoken)
+)]
 async fn run(
     settings: Settings,
     mut output_tx: mpsc::Sender<OutputMsg>,
     input_rx: mpsc::Receiver<InputMsg>,
     mut stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
-) {
+) -> Result<(), anyhow::Error> {
     let mut stream = match TcpStream::connect(settings.get_full_address()).await {
         Ok(s) => s,
         Err(e) => {
-            let err_msg = OutputMsg::new_error(e);
+            let err_msg = OutputMsg::new_error(&e);
             let _ = output_tx.send(err_msg).await;
-            return;
+            return Err(e.into());
         }
     };
 
     match handshake(&mut stream, &mut stdin_req_tx, &mut output_tx).await {
         Ok(_) => {}
         Err(e) => {
-            let _ = output_tx.send(OutputMsg::new_error(e)).await;
-            return;
+            let _ = output_tx.send(OutputMsg::new_error(&e)).await;
+            return Err(e.into());
         }
     }
 
@@ -79,6 +104,7 @@ async fn run(
 
     let _ = input_handle.await;
     let _ = recv_handle.await;
+    Ok(())
 }
 
 /// TODO: move this somewhere
@@ -89,14 +115,32 @@ async fn recv_msg_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = recv_msg(reader, output_tx) => {
+        res = recv_msg(reader, output_tx) => {
+                match res {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("`recv_msg` can't work anymore:\n{:?}", e);
+                    }
+                }
                 ctoken.cancel();
             }
     }
 }
 
-/// TODO: Description
-async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
+/// # `recv_msg`
+///
+/// Receiving messages from the server
+///
+///
+/// ## Patameters
+///
+/// reader: half of the sockets that receives from the server
+/// output_tx: channel for displaying output
+#[tracing::instrument(name = "Receiving from server", skip(reader, output_tx))]
+async fn recv_msg(
+    reader: OwnedReadHalf,
+    output_tx: mpsc::Sender<OutputMsg>,
+) -> Result<(), anyhow::Error> {
     let mut reader = BufReader::new(reader);
     let mut recv_handler = RecvHandler::new();
 
@@ -107,14 +151,14 @@ async fn recv_msg(reader: OwnedReadHalf, output_tx: mpsc::Sender<OutputMsg>) {
             Ok(_) => {
                 match output_tx.send(OutputMsg::new(&response)).await {
                     Ok(_) => {}
-                    Err(_) => {
-                        break;
+                    Err(e) => {
+                        return Err(e.into());
                     }
                 };
             }
             Err(e) => {
-                let _ = output_tx.send(OutputMsg::new_error(e)).await;
-                break;
+                let _ = output_tx.send(OutputMsg::new_error(&e)).await;
+                return Err(e.into());
             }
         }
     }
@@ -140,28 +184,53 @@ pub async fn client_commands_wrapper(
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        _ = client_commands(
+        res = client_commands(
                 input_tx,
                 req_rx,
                 output_tx,
             ) => {
+                match res {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("`client_commands` can't work anymore:\n{:?}", e)
+                    }
+                }
                 ctoken.cancel();
             }
     }
 }
 
-/// TODO: description, refactor, telemetry, error handling, move the code somewhere else, graceful shutdown, duplication in `server_lib::server_commands`
+/// TODO: move the code somewhere else, duplication in `server_lib::server_commands`
+/// #`client_commands`
+///
+/// Handles inputs from stdin.
+/// Receives request for reading from stdin through `req_rx`, at the same time allows the user to
+/// type.
+/// After the user finished typing, if there is a pending request to stdin the content written by
+/// the user will be sent to the requester through the oneshot channel inside `StdinRequest`; if
+/// there are no requests pending the content will be sent to `id_record` through `comm_tx`,
+/// becouse it is assumed to be a command issued by the admin.
+/// The command `CLIENT_COM` will be sent directly to the function that displays the output through
+/// `output_tx`.
+///
+///
+/// ## Parameters
+///
 /// - `input_tx` -> sends user's messages and commands from stdin to the functionality that handles
 /// them.
 /// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
 /// input from stdin it sends said input through this channel and `client_command` will respond to
 /// it.
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
+#[tracing::instrument(
+    name = "Receiving commands from user",
+    skip(input_tx, req_rx, output_tx)
+)]
 async fn client_commands(
     input_tx: mpsc::Sender<InputMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
     output_tx: mpsc::Sender<OutputMsg>,
-) {
+) -> Result<(), anyhow::Error> {
     let mut typer = BufReader::new(stdin());
     let mut content = String::new();
 
@@ -173,8 +242,8 @@ async fn client_commands(
                 match res {
                     Ok(_) => {},
                     Err(e) => {
-                        let _ = output_tx.send(OutputMsg::new_error(e)).await;
-                        return;
+                        let _ = output_tx.send(OutputMsg::new_error(&e)).await;
+                        return Err(e.into());
                     }
                 }
             }
@@ -182,8 +251,9 @@ async fn client_commands(
                 let r = match res {
                     Some(r) => {r},
                     None => {
-                        let _ = output_tx.send(OutputMsg::new_error("Failed to receive request for stdin in `client_commands`")).await;
-                        return;
+                        let msg = "Failed to send a stdin response in `client_commands`";
+                        let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                        return Err(anyhow::anyhow!(msg));
                     }
                 };
                 requests.push_back(r);
@@ -196,12 +266,7 @@ async fn client_commands(
 
         if content.len() > 0 {
             if content == CLIENT_COM {
-                match output_tx.send(OutputMsg::new(COMMANDS)).await {
-                    Ok(_) => {}
-                    Err(_) => {
-                        return;
-                    }
-                }
+                output_tx.send(OutputMsg::new(COMMANDS)).await?;
             } else {
                 loop {
                     // Responding to a request
@@ -228,17 +293,12 @@ async fn client_commands(
                                     match input_tx.send(m).await {
                                         Ok(_) => {}
                                         Err(e) => {
-                                            let _ = output_tx.send(OutputMsg::new_error(e)).await;
-                                            return;
+                                            let _ = output_tx.send(OutputMsg::new_error(&e)).await;
+                                            return Err(e.into());
                                         }
                                     };
                                 }
-                                Err(e) => match output_tx.send(OutputMsg::new_error(&e)).await {
-                                    Ok(_) => {}
-                                    Err(_) => {
-                                        return;
-                                    }
-                                },
+                                Err(e) => output_tx.send(OutputMsg::new_error(&e)).await?,
                             }
                         }
                     }
@@ -256,9 +316,8 @@ pub enum InputMsg {
     Command { payload: ClientCommand },
 }
 
-/// TODO: custom error
 impl InputMsg {
-    pub fn build(payload: &str) -> Result<Self, String> {
+    pub fn build(payload: &str) -> Result<Self, anyhow::Error> {
         match payload.chars().nth(0) {
             Some(c) => {
                 if c == '&' {
@@ -267,7 +326,7 @@ impl InputMsg {
                             payload: ClientCommand::ListUsers,
                         });
                     } else {
-                        return Err("Invalid command".into());
+                        return Err(anyhow::anyhow!("Invalid command"));
                     }
                 } else {
                     return Ok(InputMsg::Plain {
@@ -276,14 +335,18 @@ impl InputMsg {
                 }
             }
             None => {
-                return Err("Empty string has been provided.".into());
+                return Err(anyhow::anyhow!("Empty string has been provided."));
             }
         }
     }
 
-    /// TODO: Description, refactor
+    /// `action`
+    ///
+    /// This method call the action appropriate for a specific variant.
+    /// Usually communicates with the server.
+    ///
     /// - writer: socket that writes to the server
-    /// - output_tx: channel that displays output
+    /// - write_handler: handler that uses `writer`
     pub async fn action(
         &self,
         writer: &mut BufWriter<OwnedWriteHalf>,
@@ -291,10 +354,12 @@ impl InputMsg {
     ) -> Result<(), WriteHandlerError> {
         match self {
             InputMsg::Plain { payload } => {
+                tracing::info!("Writing plain string to server");
                 write_handler.write(&payload, writer).await?;
             }
             InputMsg::Command { payload } => match payload {
                 ClientCommand::ListUsers => {
+                    tracing::info!("Writing LIST command to server");
                     write_handler.write(LIST, writer).await?;
                 }
             },
@@ -303,6 +368,7 @@ impl InputMsg {
     }
 }
 
+// TODO: comment
 pub enum ClientCommand {
     ListUsers,
 }

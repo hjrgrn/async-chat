@@ -79,7 +79,7 @@ pub async fn id_record(
                     None => {
                         let msg = "id_record is unable to communicate with `run`";
                         let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
-                        tracing::error!(msg);
+                        tracing::error!("{}", msg);
                         break;
                     }
                 };
