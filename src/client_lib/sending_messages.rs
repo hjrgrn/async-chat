@@ -10,14 +10,14 @@ use crate::shared_lib::{socket_handling::WriteHandler, OutputMsg};
 use super::InputMsg;
 
 pub async fn handling_stdin_input_wrapper(
-    writer: OwnedWriteHalf,
+    mut write_handler: WriteHandler<BufWriter<OwnedWriteHalf>>,
     input_rx: mpsc::Receiver<InputMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
     ctoken: CancellationToken,
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        res = handling_stdin_input(writer, input_rx, output_tx) => {
+        res = handling_stdin_input(&mut write_handler, input_rx, output_tx) => {
                 match res {
                     Ok(_) => {}
                     Err(e) => {
@@ -39,19 +39,20 @@ pub async fn handling_stdin_input_wrapper(
 /// - writer: socket that writes to the server
 /// - input_rx: channel that receives input from the user
 /// - output_tx: channel for displaying output
-#[tracing::instrument(name = "Handling input from stdin", skip(writer, input_rx, output_tx))]
+/// TODO: comment
+#[tracing::instrument(
+    name = "Handling input from stdin",
+    skip(write_handler, input_rx, output_tx)
+)]
 async fn handling_stdin_input(
-    writer: OwnedWriteHalf,
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     mut input_rx: mpsc::Receiver<InputMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
-    let mut writer = BufWriter::new(writer);
-    let mut write_handler = WriteHandler::new();
-
     loop {
         let res = &mut input_rx.recv().await;
         match res {
-            Some(inp) => match inp.action(&mut writer, &mut write_handler).await {
+            Some(inp) => match inp.action(write_handler).await {
                 Ok(_) => {}
                 Err(e) => {
                     let _ = output_tx.send(OutputMsg::new_error(&e)).await;
