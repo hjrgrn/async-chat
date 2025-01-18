@@ -1,8 +1,11 @@
 use std::fmt::{Debug, Display};
 
+use aes_gcm::{Aes256Gcm, KeyInit};
+use rand::rngs::OsRng;
+use rsa::{pkcs1::DecodeRsaPublicKey, Pkcs1v15Encrypt, RsaPublicKey};
 use tokio::{
     io::{BufReader, BufWriter},
-    net::TcpStream,
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
     sync::{mpsc, oneshot},
 };
 
@@ -13,19 +16,26 @@ use crate::{
     shared_lib::{OutputMsg, StdinRequest},
 };
 
-/// TODO: desctiption, custom error, error handling
+/// TODO: comment, custom error, error handling
 pub async fn handshake(
-    stream: &mut TcpStream,
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     stdin_req_tx: &mut mpsc::Sender<StdinRequest>,
     output_tx: &mut mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
-    let (mut reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(&mut reader);
-    let mut writer = BufWriter::new(&mut writer);
     let mut response = String::new();
 
-    let mut write_handler = WriteHandler::new();
-    let mut recv_handler = RecvHandler::new();
+    // TODO: refactor here
+    read_handler.recv_str(&mut response).await?;
+    let mut rng = OsRng::default();
+    let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(&response)?;
+    let aes_key = Aes256Gcm::generate_key(&mut rng);
+    let key_bytes: [u8; 32] = aes_key.try_into()?;
+    let rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
+    write_handler.write_bytes(&rsa_enc_aes_key).await?;
+    let cipher = Aes256Gcm::new(&aes_key);
+    write_handler.import_cipher(cipher.clone());
+    read_handler.import_cipher(cipher);
 
     output_tx
         .send(OutputMsg::new(
@@ -45,7 +55,7 @@ pub async fn handshake(
             nick = rx => {
                 match nick {
                     Ok(n) => {
-                        write_handler.write(&n, &mut writer).await?;
+                        write_handler.write_str(&n).await?;
                     }
                     Err(e) => {
                         output_tx.send(OutputMsg::new_error(&format!("{}, Retry.", e))).await?;
@@ -54,7 +64,7 @@ pub async fn handshake(
             }
             // reading the response from the server
             // r = reader.read_line(&mut response) => {
-            r = recv_handler.recv(&mut response, &mut reader) => {
+            r = read_handler.recv_str(&mut response) => {
                 match handles_response(output_tx, &r, &response).await {
                         Ok(keep_trying) => {
                             if keep_trying {

@@ -64,7 +64,7 @@ pub async fn run_wrapper(
 /// input_rx: channel that receives input from the user
 /// stdin_req_tx: channel for requesting informations from stdin
 /// ctoken: cancellation token
-/// TODO: move this somewhere else
+/// TODO: move this somewhere else, comment
 #[tracing::instrument(
     name = "Client main task is running",
     skip(settings, output_tx, input_rx, stdin_req_tx, ctoken)
@@ -76,7 +76,7 @@ async fn run(
     mut stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
 ) -> Result<(), anyhow::Error> {
-    let mut stream = match TcpStream::connect(settings.get_full_address()).await {
+    let stream = match TcpStream::connect(settings.get_full_address()).await {
         Ok(s) => s,
         Err(e) => {
             let err_msg = OutputMsg::new_error(&e);
@@ -85,7 +85,20 @@ async fn run(
         }
     };
 
-    match handshake(&mut stream, &mut stdin_req_tx, &mut output_tx).await {
+    let (read, write) = stream.into_split();
+    let reader = BufReader::new(read);
+    let writer = BufWriter::new(write);
+    let mut write_handler = WriteHandler::new(writer);
+    let mut read_handler = RecvHandler::new(reader);
+
+    match handshake(
+        &mut write_handler,
+        &mut read_handler,
+        &mut stdin_req_tx,
+        &mut output_tx,
+    )
+    .await
+    {
         Ok(_) => {}
         Err(e) => {
             let _ = output_tx.send(OutputMsg::new_error(&e)).await;
@@ -93,14 +106,13 @@ async fn run(
         }
     }
 
-    let (read_half, write_half) = stream.into_split();
     let input_handle = tokio::spawn(handling_stdin_input_wrapper(
-        write_half,
+        write_handler,
         input_rx,
         output_tx.clone(),
         ctoken.clone(),
     ));
-    let recv_handle = tokio::spawn(recv_msg_wrapper(read_half, output_tx, ctoken));
+    let recv_handle = tokio::spawn(recv_msg_wrapper(read_handler, output_tx, ctoken));
 
     let _ = input_handle.await;
     let _ = recv_handle.await;
@@ -109,13 +121,13 @@ async fn run(
 
 /// TODO: move this somewhere
 async fn recv_msg_wrapper(
-    reader: OwnedReadHalf,
+    mut read_handler: RecvHandler<BufReader<OwnedReadHalf>>,
     output_tx: mpsc::Sender<OutputMsg>,
     ctoken: CancellationToken,
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        res = recv_msg(reader, output_tx) => {
+        res = recv_msg(&mut read_handler, output_tx) => {
                 match res {
                     Ok(_) => {}
                     Err(e) => {
@@ -136,18 +148,16 @@ async fn recv_msg_wrapper(
 ///
 /// reader: half of the sockets that receives from the server
 /// output_tx: channel for displaying output
-#[tracing::instrument(name = "Receiving from server", skip(reader, output_tx))]
+/// TODO: comment
+#[tracing::instrument(name = "Receiving from server", skip(read_handler, output_tx))]
 async fn recv_msg(
-    reader: OwnedReadHalf,
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
-    let mut reader = BufReader::new(reader);
-    let mut recv_handler = RecvHandler::new();
-
     let mut response = String::new();
 
     loop {
-        match recv_handler.recv(&mut response, &mut reader).await {
+        match read_handler.recv_str(&mut response).await {
             Ok(_) => {
                 match output_tx.send(OutputMsg::new(&response)).await {
                     Ok(_) => {}
@@ -349,18 +359,17 @@ impl InputMsg {
     /// - write_handler: handler that uses `writer`
     pub async fn action(
         &self,
-        writer: &mut BufWriter<OwnedWriteHalf>,
-        write_handler: &mut WriteHandler,
+        write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     ) -> Result<(), WriteHandlerError> {
         match self {
             InputMsg::Plain { payload } => {
                 tracing::info!("Writing plain string to server");
-                write_handler.write(&payload, writer).await?;
+                write_handler.write_str(&payload).await?;
             }
             InputMsg::Command { payload } => match payload {
                 ClientCommand::ListUsers => {
                     tracing::info!("Writing LIST command to server");
-                    write_handler.write(LIST, writer).await?;
+                    write_handler.write_str(LIST).await?;
                 }
             },
         }

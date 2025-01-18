@@ -2,14 +2,13 @@ use crate::globals::{HANDSHAKE_TIMEOUT, LIST, TIMEOUT};
 use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
-use crate::shared_lib::socket_handling::{RecvHandlerError, WriteHandler};
+use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
 use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::tcp::WriteHalf;
-use tokio::net::TcpStream;
+use tokio::io::{BufReader, BufWriter};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
@@ -62,8 +61,10 @@ async fn connection_dropped<T: Display>(
 ///
 ///  the nickname of the client, the receiver that will be used to receive messages from `id_record`, the channel that will be used
 /// to receive commands from `id_record`
+/// TODO: comment
 pub async fn handshake_wrapper(
-    stream: &mut TcpStream,
+    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
+    read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     addr: &SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
@@ -78,14 +79,12 @@ pub async fn handshake_wrapper(
     // Handshake
     tokio::select! {
         // getting the nickname
-        res = handshake(stream, addr.clone(), &id_tx, output_tx) => {
+        res = handshake(write_handler, read_handler, addr.clone(), &id_tx, output_tx) => {
             return res;
         }
         // timer
         _ = time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT)) => {
-            let mut buffer = BufWriter::new(stream);
-            let _ = buffer.write_all(TIMEOUT.as_bytes()).await;
-            let _ = buffer.flush();
+            let _ = write_handler.write_str(TIMEOUT).await;
             return Err(HandshakeError::NonFatal(anyhow!("Handshake failed becouse timeout has been reached.")));
         }
     }
@@ -140,7 +139,9 @@ pub async fn read_branch(
                         .map_err(|e| ReadBranchError::Fatal(e))?;
                     res = Err(ReadBranchError::NonFatal(err.into()));
                 }
-                RecvHandlerError::MalformedPacket(_) | RecvHandlerError::IoError(_) => {
+                RecvHandlerError::MalformedPacket(_)
+                | RecvHandlerError::IoError(_)
+                | RecvHandlerError::EncryptionError(_) => {
                     connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx)
                         .await
                         .map_err(|e| ReadBranchError::Fatal(e))?;
@@ -260,20 +261,23 @@ async fn read_branch_n(
 /// - `id_tx`: channel used to send messages to `id_record`
 /// - `line`: line about to be transmitted to the client
 /// - `output_tx`: communicates eventual outputs with third parties
-#[tracing::instrument(name = "Writing to connection", skip(res, writer, id_tx, output_tx))]
+/// TODO: comment
+#[tracing::instrument(
+    name = "Writing to connection",
+    skip(res, write_handler, id_tx, output_tx)
+)]
 pub async fn write_branch(
     res: Result<Message, RecvError>,
     addr: &SocketAddr,
-    writer: &mut BufWriter<&mut WriteHalf<'_>>,
+    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), WriteBranchError> {
-    let mut write_handler = WriteHandler::new();
     match res {
         Ok(msg) => match msg {
             Message::Broadcast { content, address } => {
                 if address != *addr {
-                    match write_handler.write(&content, writer).await {
+                    match write_handler.write_str(&content).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
                             connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)
@@ -286,7 +290,7 @@ pub async fn write_branch(
             }
             Message::Personal { content, address } => {
                 if address == *addr {
-                    match write_handler.write(&content, writer).await {
+                    match write_handler.write_str(&content).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
                             connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)

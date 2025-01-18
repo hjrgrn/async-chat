@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::server_lib::connection_handling::auxiliaries::{read_branch, write_branch};
 use crate::server_lib::structs::CommandFromIdRecord;
-use crate::shared_lib::socket_handling::RecvHandler;
+use crate::shared_lib::socket_handling::{RecvHandler, WriteHandler};
 
 use self::auxiliaries::handshake_wrapper;
 
@@ -83,14 +83,26 @@ async fn connection_handler(
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     // buffers
-    let mut reader;
-    let mut writer;
     let mut line = String::new();
     let mut id_hand_rx;
     let mut command_rx;
     let nick;
 
-    match handshake_wrapper(&mut stream, &id_tx, &addr, &output_tx).await {
+    let (read, write) = stream.split();
+    let reader = BufReader::new(read);
+    let writer = BufWriter::new(write);
+    let mut write_handler = WriteHandler::new(writer);
+    let mut read_handler = RecvHandler::new(reader);
+
+    match handshake_wrapper(
+        &mut write_handler,
+        &mut read_handler,
+        &id_tx,
+        &addr,
+        &output_tx,
+    )
+    .await
+    {
         Ok((n, i, c)) => {
             nick = n;
             tracing::Span::current().record("username", &nick);
@@ -111,12 +123,6 @@ async fn connection_handler(
             }
         },
     }
-
-    let (mut read, mut write) = stream.split();
-    reader = BufReader::new(&mut read);
-    writer = BufWriter::new(&mut write);
-
-    let mut recv_handler = RecvHandler::new();
 
     loop {
         tokio::select! {
@@ -156,7 +162,7 @@ async fn connection_handler(
                 }
             }
             // read from the client
-            bytes = recv_handler.recv(&mut line, &mut reader) => {
+            bytes = read_handler.recv_str(&mut line) => {
                 match read_branch(
                     bytes,
                     &mut line,
@@ -189,7 +195,7 @@ async fn connection_handler(
 
             // sends content to the client
             res = int_com_rx.recv() => {
-                match write_branch(res, &addr, &mut writer, &id_tx, output_tx.clone()).await {
+                match write_branch(res, &addr, &mut write_handler, &id_tx, output_tx.clone()).await {
                     Ok(_) => {}
                     Err(e) => {
                         match e {
