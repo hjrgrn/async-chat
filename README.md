@@ -1,6 +1,6 @@
 # Async Chat
 
-Asynchronous chat written using [tokio](https://tokio.rs/) for practicing purpose. Don't use it into production.
+Asynchronous encrypted chat written using [tokio](https://tokio.rs/) for practicing purpose. Don't use it into production.
 
 
 ## Dependencies

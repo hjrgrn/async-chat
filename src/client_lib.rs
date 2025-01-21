@@ -64,7 +64,6 @@ pub async fn run_wrapper(
 /// input_rx: channel that receives input from the user
 /// stdin_req_tx: channel for requesting informations from stdin
 /// ctoken: cancellation token
-/// TODO: move this somewhere else, comment
 #[tracing::instrument(
     name = "Client main task is running",
     skip(settings, output_tx, input_rx, stdin_req_tx, ctoken)

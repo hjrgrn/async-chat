@@ -114,7 +114,7 @@ pub async fn handshake_wrapper(
     skip(bytes, line, id_tx, id_hand_rx, int_com_tx, nick, output_tx)
 )]
 pub async fn read_branch(
-    bytes: Result<usize, RecvHandlerError>,
+    bytes: Result<(), RecvHandlerError>,
     line: &mut String,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     addr: &SocketAddr,
@@ -122,7 +122,7 @@ pub async fn read_branch(
     int_com_tx: &broadcast::Sender<Message>,
     nick: &str,
     output_tx: mpsc::Sender<OutputMsg>,
-) -> Result<usize, ReadBranchError> {
+) -> Result<(), ReadBranchError> {
     let res;
     match bytes {
         Ok(n) => {
