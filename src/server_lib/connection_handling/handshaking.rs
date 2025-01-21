@@ -26,15 +26,20 @@ use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler}
 
 /// # `handshake`
 ///
-/// Procedure for accepting or refusing a connection,
-/// will return a `Result` containig the nickname of
+/// Procedure for accepting or refusing a connection.
+/// During this procedure all the information necessary for the
+/// communication will be exchanged and set.
+/// In this fase `write_handler` and `read_handler` will be provided with the
+/// cipher for encrypted communication, and endpoints are authenticated.
+/// It will return a `Result` containig the nickname of
 /// the new client, the channels that `id_record`
 /// will use to send messages to `connection_handler` or an error;
 /// the error may be fatal, if that is the case the application needs to shutdown.
 ///
 /// ## Parameters
 ///
-/// - `stream: &mut TcpStream`: `TcpStream` that communicates with the client.
+/// - `write_handler`: handles the write part of the socket.
+/// - `read_handler`: handles the read part of the socket.
 /// - `addr: SocketAddr`: ip address and port used by the client.
 /// - `int_com_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>`: transmitter used to send messages to the
 /// `id_record`.
@@ -44,7 +49,6 @@ use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler}
 ///
 /// client name, channel for receiving messages from `id_record` and channle
 /// for receiving commands from `id_record`
-/// TODO: comment
 pub async fn handshake(
     write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
     read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
@@ -64,28 +68,7 @@ pub async fn handshake(
     let (req_tx, mut req_rx) = mpsc::channel(10);
     let (mut command_tx, mut command_rx);
 
-    // TODO: refactor here
-    let mut rng = OsRng::default();
-    let bits = 1024;
-    let priv_key =
-        RsaPrivateKey::new(&mut rng, bits).map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let pub_key = RsaPublicKey::from(&priv_key);
-    let pk_str = pub_key.to_pkcs1_pem(LineEnding::default()).unwrap();
-    write_handler
-        .write_str(&pk_str)
-        .await
-        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let enc_key_bytes = read_handler
-        .recv_bytes()
-        .await
-        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let key_bytes = &priv_key
-        .decrypt(Pkcs1v15Encrypt, &enc_key_bytes)
-        .map_err(|e| HandshakeError::NonFatal(e.into()))?[..32];
-    let aes_key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(&aes_key);
-    write_handler.import_cipher(cipher.clone());
-    read_handler.import_cipher(cipher);
+    key_exchange(write_handler, read_handler).await?;
 
     loop {
         counter += 1;
@@ -178,6 +161,43 @@ pub async fn handshake(
     }
 
     Ok((nick, req_rx, command_rx))
+}
+
+/// # `handshake`'s helper `key_exchange`
+///
+/// This function uses the socket handlers and RSA for exchanging a AES key
+/// that will be used to produce a cipher, which will be assigned to both
+/// the handlers.
+/// This function may return an error that can be fatal, in this case the
+/// application needs to shutdown.
+async fn key_exchange(
+    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
+    read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
+) -> Result<(), HandshakeError> {
+    let mut rng = OsRng::default();
+    let bits = 1024;
+    let priv_key =
+        RsaPrivateKey::new(&mut rng, bits).map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let pub_key = RsaPublicKey::from(&priv_key);
+    let pk_str = pub_key
+        .to_pkcs1_pem(LineEnding::default())
+        .map_err(|e| HandshakeError::Fatal(e.into()))?;
+    write_handler
+        .write_str(&pk_str)
+        .await
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let enc_key_bytes = read_handler
+        .recv_bytes()
+        .await
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let key_bytes = &priv_key
+        .decrypt(Pkcs1v15Encrypt, &enc_key_bytes)
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?[..32];
+    let aes_key = Key::<Aes256Gcm>::from_slice(key_bytes);
+    let cipher = Aes256Gcm::new(&aes_key);
+    write_handler.import_cipher(cipher.clone());
+    read_handler.import_cipher(cipher);
+    Ok(())
 }
 
 #[derive(thiserror::Error)]

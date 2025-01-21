@@ -36,10 +36,9 @@ pub async fn handling_stdin_input_wrapper(
 ///
 /// ## Parameters
 ///
-/// - writer: socket that writes to the server
+/// - write_hadler: write socket handler
 /// - input_rx: channel that receives input from the user
 /// - output_tx: channel for displaying output
-/// TODO: comment
 #[tracing::instrument(
     name = "Handling input from stdin",
     skip(write_handler, input_rx, output_tx)

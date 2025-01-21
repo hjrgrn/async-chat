@@ -25,17 +25,7 @@ pub async fn handshake(
 ) -> Result<(), anyhow::Error> {
     let mut response = String::new();
 
-    // TODO: refactor here
-    read_handler.recv_str(&mut response).await?;
-    let mut rng = OsRng::default();
-    let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(&response)?;
-    let aes_key = Aes256Gcm::generate_key(&mut rng);
-    let key_bytes: [u8; 32] = aes_key.try_into()?;
-    let rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
-    write_handler.write_bytes(&rsa_enc_aes_key).await?;
-    let cipher = Aes256Gcm::new(&aes_key);
-    write_handler.import_cipher(cipher.clone());
-    read_handler.import_cipher(cipher);
+    key_exchange(read_handler, write_handler).await?;
 
     output_tx
         .send(OutputMsg::new(
@@ -63,7 +53,6 @@ pub async fn handshake(
                 }
             }
             // reading the response from the server
-            // r = reader.read_line(&mut response) => {
             r = read_handler.recv_str(&mut response) => {
                 match handles_response(output_tx, &r, &response).await {
                         Ok(keep_trying) => {
@@ -97,10 +86,9 @@ pub async fn handshake(
 /// - output_tx: channel that displays eventual outputs
 /// - outcome: result of the communication between client and server
 /// - response: values returned by the server.
-/// TODO: gracefull shutdown
 async fn handles_response(
     output_tx: &mut mpsc::Sender<OutputMsg>,
-    outcome: &Result<usize, RecvHandlerError>,
+    outcome: &Result<(), RecvHandlerError>,
     response: &str,
 ) -> Result<bool, anyhow::Error> {
     match outcome {
@@ -155,6 +143,24 @@ async fn handles_response(
         }
     }
     Ok(true)
+}
+
+async fn key_exchange(
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+) -> Result<(), anyhow::Error> {
+    let mut response = String::new();
+    read_handler.recv_str(&mut response).await?;
+    let mut rng = OsRng::default();
+    let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(&response)?;
+    let aes_key = Aes256Gcm::generate_key(&mut rng);
+    let key_bytes: [u8; 32] = aes_key.try_into()?;
+    let rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
+    write_handler.write_bytes(&rsa_enc_aes_key).await?;
+    let cipher = Aes256Gcm::new(&aes_key);
+    write_handler.import_cipher(cipher.clone());
+    read_handler.import_cipher(cipher);
+    Ok(())
 }
 
 /// TODO: everything, waiting for anyhow
