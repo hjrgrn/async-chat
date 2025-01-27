@@ -4,6 +4,7 @@ use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
+use secrecy::SecretString;
 use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -68,6 +69,7 @@ pub async fn handshake_wrapper(
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     addr: &SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
+    shared_secret: SecretString,
 ) -> Result<
     (
         String,
@@ -79,7 +81,7 @@ pub async fn handshake_wrapper(
     // Handshake
     tokio::select! {
         // getting the nickname
-        res = handshake(write_handler, read_handler, addr.clone(), &id_tx, output_tx) => {
+        res = handshake(write_handler, read_handler, addr.clone(), &id_tx, output_tx, shared_secret) => {
             return res;
         }
         // timer

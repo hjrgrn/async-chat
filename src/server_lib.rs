@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use connection_handling::connection_handler_wrapper;
+use secrecy::SecretString;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,7 @@ mod structs;
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
 /// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
 pub async fn run_wrapper(
     settings: Settings,
     con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -38,6 +40,7 @@ pub async fn run_wrapper(
     output_tx: mpsc::Sender<OutputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
+    shared_secret: SecretString,
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
@@ -48,6 +51,7 @@ pub async fn run_wrapper(
             output_tx,
             stdin_req_tx,
             ctoken.clone(),
+            shared_secret,
         ) => {
             match res {
                 Ok(()) => {},
@@ -78,9 +82,10 @@ pub async fn run_wrapper(
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
 /// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
 #[tracing::instrument(
     name = "Server is running",
-    skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx)
+    skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx, shared_secret)
 )]
 async fn run(
     settings: Settings,
@@ -89,6 +94,7 @@ async fn run(
     output_tx: mpsc::Sender<OutputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
+    shared_secret: SecretString,
 ) -> Result<(), anyhow::Error> {
     output_tx.send(OutputMsg::new("Listening...")).await?;
     let listener = match TcpListener::bind(&settings.get_full_address()).await {
@@ -172,6 +178,7 @@ async fn run(
                     con_hand_id_tx1,
                     output_tx.clone(),
                     ctoken.clone(),
+                    shared_secret.clone()
                 ));
             }
             IdRecordRunMsg::IsThereSpace(false) => {

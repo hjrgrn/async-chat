@@ -1,3 +1,5 @@
+use std::env;
+
 use lib::{
     server_lib::{
         self, administration::server_commands_wrapper, settings::get_settings,
@@ -6,11 +8,16 @@ use lib::{
     shared_lib::{display_output, graceful_shutdown::handling_sigint, OutputMsg, StdinRequest},
     telemetry::{get_subscriber, init_subscriber},
 };
+use secrecy::SecretString;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 pub async fn main() {
+    // NOTE: for the time being it will be possible to abtain the shared secret only from an
+    // environment variable `ASYNC_CHAT_SECRET`
+    let shared_secret = SecretString::from(env::var("ASYNC_CHAT_SECRET").expect("Failed to obtain the shared secret, write that into the environment variable \"ASYNC_CHAT_SECRET\""));
+
     let sub = get_subscriber("TcpChatServer".into(), "warn".into(), std::io::stdout);
     init_subscriber(sub);
     let settings = match get_settings() {
@@ -48,6 +55,7 @@ pub async fn main() {
         output_tx,
         stdin_req_tx,
         ctoken,
+        shared_secret,
     )
     .await
 }

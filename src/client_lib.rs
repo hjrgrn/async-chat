@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use globals::CLIENT_COM;
 use handshaking::handshake;
+use secrecy::SecretString;
 use sending_messages::handling_stdin_input_wrapper;
 use tokio::{
     io::{stdin, AsyncBufReadExt, BufReader, BufWriter},
@@ -37,10 +38,11 @@ pub async fn run_wrapper(
     input_rx: mpsc::Receiver<InputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
+    shared_secret: SecretString,
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
-        res = run(settings, output_tx, input_rx, stdin_req_tx, ctoken.clone()) => {
+        res = run(settings, output_tx, input_rx, stdin_req_tx, ctoken.clone(), shared_secret) => {
                 match res {
                     Ok(_) => {}
                     Err(e) => {
@@ -64,9 +66,10 @@ pub async fn run_wrapper(
 /// input_rx: channel that receives input from the user
 /// stdin_req_tx: channel for requesting informations from stdin
 /// ctoken: cancellation token
+/// shared_secret: Secret needed during authentication
 #[tracing::instrument(
     name = "Client main task is running",
-    skip(settings, output_tx, input_rx, stdin_req_tx, ctoken)
+    skip(settings, output_tx, input_rx, stdin_req_tx, ctoken, shared_secret)
 )]
 async fn run(
     settings: Settings,
@@ -74,6 +77,7 @@ async fn run(
     input_rx: mpsc::Receiver<InputMsg>,
     mut stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
+    shared_secret: SecretString,
 ) -> Result<(), anyhow::Error> {
     let stream = match TcpStream::connect(settings.get_full_address()).await {
         Ok(s) => s,
@@ -95,6 +99,7 @@ async fn run(
         &mut read_handler,
         &mut stdin_req_tx,
         &mut output_tx,
+        shared_secret
     )
     .await
     {

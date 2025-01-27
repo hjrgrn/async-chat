@@ -23,3 +23,7 @@ anyhow = "1.0.94"
 rsa = "0.9.7"
 rand = "0.8.5"
 aes-gcm = "0.10.3"
+secrecy = { version = "0.10.3", features = ["serde"] }
+sha2 = "0.10.8"
+hmac = { version = "0.12.1", features = ["std"]}
+hex = "0.4.3"
