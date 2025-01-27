@@ -3,6 +3,7 @@
 //! Set of functions relative to the handling of the incoming connections
 
 use auxiliaries::{ReadBranchError, WriteBranchError};
+use secrecy::SecretString;
 use std::net::SocketAddr;
 use tokio::io::{BufReader, BufWriter};
 use tokio::net::TcpStream;
@@ -30,6 +31,7 @@ pub async fn connection_handler_wrapper(
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
     output_tx: mpsc::Sender<OutputMsg>,     // Output channel
     ctoken: CancellationToken,
+    shared_secret: SecretString, // Secret needed for authenticate the users during handshake.
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
@@ -40,6 +42,7 @@ pub async fn connection_handler_wrapper(
                 int_com_rx,
                 id_tx,
                 output_tx.clone(),
+                shared_secret,
             ) => {
             match res {
                 Ok(_) => {}
@@ -66,9 +69,10 @@ pub async fn connection_handler_wrapper(
 /// - mut int_com_rx: channel for communication internale to the handler, receiver
 /// - id_tx: channel for communication with id_record, transmitter
 /// - output_tx: output channel
+/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
 #[tracing::instrument(
     name = "Handling connection.",
-    skip(stream, addr, int_com_tx, int_com_rx, id_tx, output_tx),
+    skip(stream, addr, int_com_tx, int_com_rx, id_tx, output_tx, shared_secret),
     fields(
         username = tracing::field::Empty,
         address = %addr
@@ -81,6 +85,7 @@ async fn connection_handler(
     mut int_com_rx: broadcast::Receiver<Message>,
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
+    shared_secret: SecretString
 ) -> Result<(), anyhow::Error> {
     // buffers
     let mut line = String::new();
@@ -100,6 +105,7 @@ async fn connection_handler(
         &id_tx,
         &addr,
         &output_tx,
+        shared_secret
     )
     .await
     {

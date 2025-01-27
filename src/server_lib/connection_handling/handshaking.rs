@@ -11,11 +11,16 @@ use crate::server_lib::structs::CommandFromIdRecord;
 use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
-use aes_gcm::{Aes256Gcm, Key, KeyInit};
+use hmac::{Hmac, Mac};
+use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
+use rand::Rng;
 use rsa::pkcs1::EncodeRsaPublicKey;
 use rsa::pkcs8::LineEnding;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
+use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
+use std::char;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use tokio::io::{BufReader, BufWriter};
@@ -44,6 +49,7 @@ use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler}
 /// - `int_com_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>`: transmitter used to send messages to the
 /// `id_record`.
 /// - `output_tx`: Channel used to communicate the output with third parties.
+/// - `shared_secret`: Secret needed for authenticate the users during handshake.
 ///
 /// ## Returns
 ///
@@ -55,6 +61,7 @@ pub async fn handshake(
     addr: SocketAddr,
     int_com_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: &mpsc::Sender<OutputMsg>,
+    shared_secret: SecretString,
 ) -> Result<
     (
         String,
@@ -68,7 +75,7 @@ pub async fn handshake(
     let (req_tx, mut req_rx) = mpsc::channel(10);
     let (mut command_tx, mut command_rx);
 
-    key_exchange(write_handler, read_handler).await?;
+    key_exchange(write_handler, read_handler, shared_secret).await?;
 
     loop {
         counter += 1;
@@ -173,8 +180,20 @@ pub async fn handshake(
 async fn key_exchange(
     write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
     read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
+    shared_secret: SecretString,
 ) -> Result<(), HandshakeError> {
+    let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+
     let mut rng = OsRng::default();
+    // generate nonce
+    let mut body: String = rng
+        .sample_iter(Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect();
+    let sent_nonce = body.clone();
+
     let bits = 1024;
     let priv_key =
         RsaPrivateKey::new(&mut rng, bits).map_err(|e| HandshakeError::NonFatal(e.into()))?;
@@ -182,21 +201,47 @@ async fn key_exchange(
     let pk_str = pub_key
         .to_pkcs1_pem(LineEnding::default())
         .map_err(|e| HandshakeError::Fatal(e.into()))?;
+    // nonce + pem, size 24 + 251
+    body.push_str(&pk_str);
+
     write_handler
-        .write_str(&pk_str)
+        .write_str(&body)
         .await
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let enc_key_bytes = read_handler
+
+    let res = read_handler
         .recv_bytes()
         .await
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let received_nonce = &res[..24];
+    let received_rsa_hash = &res[24..24 + 32];
+
+    Mac::update(&mut hmac, &sent_nonce.as_bytes());
+    Mac::update(&mut hmac, &pk_str.as_bytes());
+    Mac::verify_slice(hmac, received_rsa_hash).map_err(|e| HandshakeError::NonFatal(e.into()))?;
+
+    let enc_key_bytes = &res[24 + 32..];
+
     let key_bytes = &priv_key
         .decrypt(Pkcs1v15Encrypt, &enc_key_bytes)
         .map_err(|e| HandshakeError::NonFatal(e.into()))?[..32];
-    let aes_key = Key::<Aes256Gcm>::from_slice(key_bytes);
-    let cipher = Aes256Gcm::new(&aes_key);
+    let aes_key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(key_bytes);
+
+    let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    Mac::update(&mut hmac, &received_nonce);
+    Mac::update(&mut hmac, &aes_key);
+    let hash = Mac::finalize(hmac).into_bytes();
+
+    write_handler
+        .write_bytes(&hash)
+        .await
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+
+    let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(&aes_key);
     write_handler.import_cipher(cipher.clone());
     read_handler.import_cipher(cipher);
+
     Ok(())
 }
 

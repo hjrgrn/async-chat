@@ -1,8 +1,11 @@
 use std::fmt::{Debug, Display};
 
 use aes_gcm::{Aes256Gcm, KeyInit};
-use rand::rngs::OsRng;
+use hmac::{Hmac, Mac};
+use rand::{distributions::Alphanumeric, rngs::OsRng, Rng};
 use rsa::{pkcs1::DecodeRsaPublicKey, Pkcs1v15Encrypt, RsaPublicKey};
+use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
 use tokio::{
     io::{BufReader, BufWriter},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -22,10 +25,11 @@ pub async fn handshake(
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     stdin_req_tx: &mut mpsc::Sender<StdinRequest>,
     output_tx: &mut mpsc::Sender<OutputMsg>,
+    shared_secret: SecretString,
 ) -> Result<(), anyhow::Error> {
     let mut response = String::new();
 
-    key_exchange(read_handler, write_handler).await?;
+    key_exchange(read_handler, write_handler, shared_secret).await?;
 
     output_tx
         .send(OutputMsg::new(
@@ -148,18 +152,47 @@ async fn handles_response(
 async fn key_exchange(
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+    shared_secret: SecretString,
 ) -> Result<(), anyhow::Error> {
+    let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(shared_secret.expose_secret().as_bytes())?;
+
     let mut response = String::new();
     read_handler.recv_str(&mut response).await?;
+    // sizes: 24, 251
+    let (received_nonce, pub_rsa_key_str) = response.split_at(24);
+
     let mut rng = OsRng::default();
-    let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(&response)?;
+    let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(pub_rsa_key_str)?;
+
+    // nonce + pub_rsa_key_str hash using secret
+    hmac.update(received_nonce.as_bytes());
+    hmac.update(pub_rsa_key_str.as_bytes());
+    // len 32
+    let mut n_pr_hash = hmac.finalize().into_bytes().to_vec();
+    // building nonce
+    let mut body: Vec<u8> = rng
+        .sample_iter(Alphanumeric)
+        .take(24)
+        .collect();
+    let sent_nonce = body.clone();
+
     let aes_key = Aes256Gcm::generate_key(&mut rng);
     let key_bytes: [u8; 32] = aes_key.try_into()?;
-    let rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
-    write_handler.write_bytes(&rsa_enc_aes_key).await?;
+    let mut rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
+    body.append(&mut n_pr_hash);
+    body.append(&mut rsa_enc_aes_key);
+    write_handler.write_bytes(&body).await?;
+
+    let res = read_handler.recv_bytes().await?;
+    let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(shared_secret.expose_secret().as_bytes())?;
+    hmac.update(&sent_nonce);
+    hmac.update(&aes_key);
+    hmac.verify_slice(&res)?;
+
     let cipher = Aes256Gcm::new(&aes_key);
     write_handler.import_cipher(cipher.clone());
     read_handler.import_cipher(cipher);
+
     Ok(())
 }
 
