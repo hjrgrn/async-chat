@@ -1,5 +1,3 @@
-use std::fmt::{Debug, Display};
-
 use aes_gcm::{Aes256Gcm, KeyInit};
 use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, rngs::OsRng, Rng};
@@ -101,10 +99,9 @@ async fn handles_response(
                 output_tx.send(OutputMsg::new(&format!("You have been accepted, type \"{}\" for displaying all the avaible commands", CLIENT_COM.trim()))).await?;
                 return Ok(false);
             } else if response == TOO_MANY_TRIES {
-                output_tx
-                    .send(OutputMsg::new("Connection refused due to: too many tries."))
-                    .await?;
-                return Err(HandshakeError.into());
+                let msg = "Connection refused due to: too many tries.";
+                output_tx.send(OutputMsg::new(msg)).await?;
+                return Err(anyhow::anyhow!(msg));
             } else if response == TOO_SHORT {
                 output_tx
                     .send(OutputMsg::new("The nickname you chose is to short, retry."))
@@ -114,10 +111,9 @@ async fn handles_response(
                     .send(OutputMsg::new("The nickname you chose is to long, retry."))
                     .await?;
             } else if response == TIMEOUT {
-                output_tx
-                    .send(OutputMsg::new("Timeout reached, try and reconnect."))
-                    .await?;
-                return Err(HandshakeError.into());
+                let msg = "Timeout reached, try and reconnect.";
+                output_tx.send(OutputMsg::new(msg)).await?;
+                return Err(anyhow::anyhow!(msg));
             } else if response == TAKEN {
                 output_tx
                     .send(OutputMsg::new(&format!(
@@ -131,10 +127,11 @@ async fn handles_response(
         Err(e) => {
             match e {
                 RecvHandlerError::ConnectionInterrupted => {
+                    let msg = "Connection reset by server.";
                     output_tx
                         .send(OutputMsg::new_error("Connection reset by server."))
                         .await?;
-                    return Err(HandshakeError.into());
+                    return Err(anyhow::anyhow!(msg));
                 }
                 _others => {}
             }
@@ -143,7 +140,7 @@ async fn handles_response(
                 .send(OutputMsg::new_error(&format!("{}", e)))
                 .await?;
 
-            return Err(HandshakeError.into());
+            return Err(anyhow::anyhow!(format!("{}", e)));
         }
     }
     Ok(true)
@@ -170,10 +167,7 @@ async fn key_exchange(
     // len 32
     let mut n_pr_hash = hmac.finalize().into_bytes().to_vec();
     // building nonce
-    let mut body: Vec<u8> = rng
-        .sample_iter(Alphanumeric)
-        .take(24)
-        .collect();
+    let mut body: Vec<u8> = rng.sample_iter(Alphanumeric).take(24).collect();
     let sent_nonce = body.clone();
 
     let aes_key = Aes256Gcm::generate_key(&mut rng);
@@ -195,17 +189,3 @@ async fn key_exchange(
 
     Ok(())
 }
-
-/// TODO: everything, waiting for anyhow
-pub struct HandshakeError;
-impl Display for HandshakeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Failed to perform the handshake")
-    }
-}
-impl Debug for HandshakeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Failed to perform the handshake")
-    }
-}
-impl std::error::Error for HandshakeError {}

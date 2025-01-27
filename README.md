@@ -13,12 +13,18 @@ Asynchronous encrypted chat written using [tokio](https://tokio.rs/) for practic
 ```bash
 git clone 'https://github.com/hjrgrn/async-chat.git'
 cd async-chat
+```
 
+The chat uses a shared secret for end point authentication that needs to be provided as an environment variable.
+
+```bash
 # server
-cargo run
+ASYNC_CHAT_SECRET="my secret" cargo run
+```
 
+```bash
 # client
-cargo run --bin client
+ASYNC_CHAT_SECRET="my secret" cargo run --bin client
 ```
 
 Exemplar configuration can be found in `<ROOT_DIRECTORY>/configuration/{ClientSettings.toml,ServerSettings.toml}`.
