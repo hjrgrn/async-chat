@@ -149,6 +149,13 @@ pub async fn read_branch(
                         .map_err(|e| ReadBranchError::Fatal(e))?;
                     res = Err(ReadBranchError::NonFatal(err.into()));
                 }
+                RecvHandlerError::HmacError(ref e) => {
+                    let _ = connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx).await;
+                    res = Err(ReadBranchError::Fatal(anyhow::anyhow!(
+                        "This is a fatal error that shouldn't have happended:\n{}",
+                        e
+                    )));
+                }
             }
         }
     }

@@ -1,4 +1,5 @@
 use aes_gcm::{Aes256Gcm, KeyInit};
+use anyhow::Context;
 use hmac::{Hmac, Mac};
 use rand::{distributions::Alphanumeric, rngs::OsRng, Rng};
 use rsa::{pkcs1::DecodeRsaPublicKey, Pkcs1v15Encrypt, RsaPublicKey};
@@ -10,7 +11,9 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
+use crate::shared_lib::socket_handling::{
+    RecvHandler, RecvHandlerError, WriteHandler, HMAC_KEY_SIZE,
+};
 use crate::{
     client_lib::globals::CLIENT_COM,
     globals::{CONNECTION_ACCEPTED, TAKEN, TIMEOUT, TOO_LONG, TOO_MANY_TRIES, TOO_SHORT},
@@ -156,7 +159,9 @@ async fn key_exchange(
     let mut response = String::new();
     read_handler.recv_str(&mut response).await?;
     // sizes: 24, 251
-    let (received_nonce, pub_rsa_key_str) = response.split_at(24);
+    let (received_nonce, pub_rsa_key_str) = response
+        .split_at_checked(24)
+        .context("Received invalid nonce/pub rsa")?;
 
     let mut rng = OsRng::default();
     let pub_rsa_key = RsaPublicKey::from_pkcs1_pem(pub_rsa_key_str)?;
@@ -172,7 +177,13 @@ async fn key_exchange(
 
     let aes_key = Aes256Gcm::generate_key(&mut rng);
     let key_bytes: [u8; 32] = aes_key.try_into()?;
-    let mut rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &key_bytes[..])?;
+
+    let hmac_secret_key: [u8; HMAC_KEY_SIZE] = rng.gen();
+    let mut payload: [u8; 64] = [0; 64];
+    payload[..32].copy_from_slice(&key_bytes);
+    payload[32..].copy_from_slice(&hmac_secret_key);
+
+    let mut rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &payload[..])?;
     body.append(&mut n_pr_hash);
     body.append(&mut rsa_enc_aes_key);
     write_handler.write_bytes(&body).await?;
@@ -181,11 +192,14 @@ async fn key_exchange(
     let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(shared_secret.expose_secret().as_bytes())?;
     hmac.update(&sent_nonce);
     hmac.update(&aes_key);
+    hmac.update(&hmac_secret_key);
     hmac.verify_slice(&res)?;
 
     let cipher = Aes256Gcm::new(&aes_key);
     write_handler.import_cipher(cipher.clone());
     read_handler.import_cipher(cipher);
+    write_handler.import_hamc_key(&hmac_secret_key)?;
+    read_handler.import_hamc_key(&hmac_secret_key)?;
 
     Ok(())
 }

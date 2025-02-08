@@ -213,24 +213,37 @@ async fn key_exchange(
         .recv_bytes()
         .await
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let received_nonce = &res[..24];
-    let received_rsa_hash = &res[24..24 + 32];
+    let (received_nonce, hash_and_key) =
+        res.split_at_checked(24)
+            .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
+                "Failed to receive nonce/hash/key"
+            )))?;
+    let (received_rsa_hash, enc_key_bytes) =
+        hash_and_key
+            .split_at_checked(32)
+            .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
+                "Failed to receive nonce/hash/key"
+            )))?;
 
     Mac::update(&mut hmac, &sent_nonce.as_bytes());
     Mac::update(&mut hmac, &pk_str.as_bytes());
     Mac::verify_slice(hmac, received_rsa_hash).map_err(|e| HandshakeError::NonFatal(e.into()))?;
 
-    let enc_key_bytes = &res[24 + 32..];
-
     let key_bytes = &priv_key
         .decrypt(Pkcs1v15Encrypt, &enc_key_bytes)
-        .map_err(|e| HandshakeError::NonFatal(e.into()))?[..32];
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let (key_bytes, hmac_secret_key) = key_bytes
+        .split_at_checked(32)
+        .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
+            "Failed to receive nonce/hash/key"
+        )))?;
     let aes_key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(key_bytes);
 
     let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
     Mac::update(&mut hmac, &received_nonce);
     Mac::update(&mut hmac, &aes_key);
+    Mac::update(&mut hmac, &hmac_secret_key);
     let hash = Mac::finalize(hmac).into_bytes();
 
     write_handler
@@ -241,6 +254,8 @@ async fn key_exchange(
     let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(&aes_key);
     write_handler.import_cipher(cipher.clone());
     read_handler.import_cipher(cipher);
+    write_handler.import_hamc_key(hmac_secret_key).map_err(|e| HandshakeError::Fatal(e))?;
+    read_handler.import_hamc_key(hmac_secret_key).map_err(|e| HandshakeError::Fatal(e))?;
 
     Ok(())
 }
