@@ -178,14 +178,26 @@ async fn key_exchange(
     let aes_key = Aes256Gcm::generate_key(&mut rng);
     let key_bytes: [u8; 32] = aes_key.try_into()?;
 
-    let hmac_secret_key: [u8; HMAC_KEY_SIZE] = rng.gen();
-    let mut payload: [u8; 64] = [0; 64];
-    payload[..32].copy_from_slice(&key_bytes);
-    payload[32..].copy_from_slice(&hmac_secret_key);
+    let mut seq_num_packet: [u8; 10] = [0; 10];
+    let seq_num = rng.gen::<u32>();
+    let seq_number_string = seq_num.to_string();
+    let seq_number_bytes = seq_number_string.as_bytes();
+    let mut index = 0;
+    for i in 10 - seq_number_bytes.len()..10 {
+        seq_num_packet[i] = seq_number_bytes[index];
+        index = index + 1;
+    }
 
-    let mut rsa_enc_aes_key = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &payload[..])?;
+    let hmac_secret_key: [u8; HMAC_KEY_SIZE] = rng.gen();
+
+    let mut payload: [u8; 74] = [0; 74];
+    payload[..32].copy_from_slice(&key_bytes);
+    payload[32..64].copy_from_slice(&hmac_secret_key);
+    payload[64..].copy_from_slice(&seq_num_packet);
+
+    let mut rsa_enc_aes_hamc_seq = pub_rsa_key.encrypt(&mut rng, Pkcs1v15Encrypt, &payload[..])?;
     body.append(&mut n_pr_hash);
-    body.append(&mut rsa_enc_aes_key);
+    body.append(&mut rsa_enc_aes_hamc_seq);
     write_handler.write_bytes(&body).await?;
 
     let res = read_handler.recv_bytes().await?;
@@ -193,6 +205,9 @@ async fn key_exchange(
     hmac.update(&sent_nonce);
     hmac.update(&aes_key);
     hmac.update(&hmac_secret_key);
+    hmac.update(&seq_num_packet);
+    hmac.update(received_nonce.as_bytes());
+    hmac.update(pub_rsa_key_str.as_bytes());
     hmac.verify_slice(&res)?;
 
     let cipher = Aes256Gcm::new(&aes_key);
@@ -200,6 +215,8 @@ async fn key_exchange(
     read_handler.import_cipher(cipher);
     write_handler.import_hamc_key(&hmac_secret_key)?;
     read_handler.import_hamc_key(&hmac_secret_key)?;
+    write_handler.import_seq_number(seq_num);
+    read_handler.import_seq_number(seq_num);
 
     Ok(())
 }

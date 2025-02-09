@@ -11,6 +11,7 @@ use crate::server_lib::structs::CommandFromIdRecord;
 use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
+use core::str;
 use hmac::{Hmac, Mac};
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -213,13 +214,18 @@ async fn key_exchange(
         .recv_bytes()
         .await
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let (received_nonce, hash_and_key) =
+    if res.len() != 184 {
+        return Err(HandshakeError::NonFatal(anyhow::anyhow!(
+            "Malformed packet received during key_exchange."
+        )));
+    }
+    let (received_nonce, hash_key_seq) =
         res.split_at_checked(24)
             .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
                 "Failed to receive nonce/hash/key"
             )))?;
-    let (received_rsa_hash, enc_key_bytes) =
-        hash_and_key
+    let (received_rsa_hash, enc_key_hmac_seq) =
+        hash_key_seq
             .split_at_checked(32)
             .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
                 "Failed to receive nonce/hash/key"
@@ -229,14 +235,28 @@ async fn key_exchange(
     Mac::update(&mut hmac, &pk_str.as_bytes());
     Mac::verify_slice(hmac, received_rsa_hash).map_err(|e| HandshakeError::NonFatal(e.into()))?;
 
-    let key_bytes = &priv_key
-        .decrypt(Pkcs1v15Encrypt, &enc_key_bytes)
+    let key_hmac_seq = &priv_key
+        .decrypt(Pkcs1v15Encrypt, &enc_key_hmac_seq)
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-    let (key_bytes, hmac_secret_key) = key_bytes
-        .split_at_checked(32)
-        .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
-            "Failed to receive nonce/hash/key"
-        )))?;
+    let (key_bytes, hmac_seq) =
+        key_hmac_seq
+            .split_at_checked(32)
+            .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
+                "Failed to receive nonce/hash/key"
+            )))?;
+    let (hmac_secret_key, seq_num_bytes) =
+        hmac_seq
+            .split_at_checked(32)
+            .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(
+                "Failed to receive nonce/hash/key"
+            )))?;
+
+    let seq_num_str =
+        str::from_utf8(seq_num_bytes).map_err(|e| HandshakeError::NonFatal(e.into()))?;
+    let seq_num = seq_num_str
+        .parse::<u32>()
+        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+
     let aes_key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(key_bytes);
 
     let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
@@ -244,6 +264,9 @@ async fn key_exchange(
     Mac::update(&mut hmac, &received_nonce);
     Mac::update(&mut hmac, &aes_key);
     Mac::update(&mut hmac, &hmac_secret_key);
+    Mac::update(&mut hmac, &seq_num_bytes);
+    Mac::update(&mut hmac, &sent_nonce.as_bytes());
+    Mac::update(&mut hmac, &pk_str.as_bytes());
     let hash = Mac::finalize(hmac).into_bytes();
 
     write_handler
@@ -254,8 +277,14 @@ async fn key_exchange(
     let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(&aes_key);
     write_handler.import_cipher(cipher.clone());
     read_handler.import_cipher(cipher);
-    write_handler.import_hamc_key(hmac_secret_key).map_err(|e| HandshakeError::Fatal(e))?;
-    read_handler.import_hamc_key(hmac_secret_key).map_err(|e| HandshakeError::Fatal(e))?;
+    write_handler
+        .import_hamc_key(hmac_secret_key)
+        .map_err(|e| HandshakeError::Fatal(e))?;
+    read_handler
+        .import_hamc_key(hmac_secret_key)
+        .map_err(|e| HandshakeError::Fatal(e))?;
+    write_handler.import_seq_number(seq_num);
+    read_handler.import_seq_number(seq_num);
 
     Ok(())
 }

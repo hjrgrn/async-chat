@@ -30,6 +30,7 @@ pub const CIPTEXT_W_NONCE_SIZE: usize = 1052;
 pub const CIPTEXT_W_NONCE_SIZE_AND_HASH: usize = 1084;
 pub const NONCE_SIZE: usize = 12;
 pub const HMAC_KEY_SIZE: usize = 32;
+pub const SEQ_NUM_SIZE: usize = 10;
 
 /// # `RecvHandler`
 ///
@@ -48,6 +49,8 @@ pub struct RecvHandler<T: AsyncRead + Unpin + Send> {
     reader: T,
     cipher: Option<AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>>,
     hmac_secret_key: Option<[u8; HMAC_KEY_SIZE]>,
+    seq_number: Option<u32>,
+    seq_num_size: usize,
 }
 
 impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
@@ -63,6 +66,8 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
             reader,
             cipher: None,
             hmac_secret_key: None,
+            seq_number: None,
+            seq_num_size: SEQ_NUM_SIZE,
         }
     }
 
@@ -89,7 +94,7 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
 
         // TODO: we may make it more efficient
         let l =
-            str::from_utf8(&self.buffer[self.pbuffer_prefix_size..self.pbuffer_prefix_size + size])
+            str::from_utf8(&self.buffer[self.cursor..self.cursor + size])
                 .context("Line sent contained invalid UTF-8")?;
         *line = l.to_string();
         if size != line.len() {
@@ -101,13 +106,32 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
         Ok(())
     }
 
+    // TODO: comment, specify use of cursor
     fn validate_packet(&mut self) -> Result<usize, RecvHandlerError> {
         // Validate packet
         let size: usize = str::from_utf8(&self.buffer[0..self.pbuffer_prefix_size])
             .context("Malformed size prefix")?
             .parse()
             .context("Malformed size prefix")?;
-        if size > self.plaintext_size - self.pbuffer_prefix_size {
+        self.cursor = self.pbuffer_prefix_size;
+        match self.seq_number {
+            Some(sn) => {
+                let recv_sec_num: u32 =
+                    str::from_utf8(&self.buffer[self.cursor..self.cursor + self.seq_num_size])
+                        .context("Malformed seq number")?
+                        .parse()
+                        .context("Malformed seq number")?;
+                if recv_sec_num != sn {
+                    return Err(RecvHandlerError::MalformedPacket(anyhow::anyhow!(
+                        "Malformed seq number"
+                    )));
+                }
+                self.seq_number = Some(sn.wrapping_add(1));
+                self.cursor = self.cursor + self.seq_num_size;
+            }
+            None => {}
+        }
+        if size > self.plaintext_size - self.cursor {
             return Err(RecvHandlerError::MalformedPacket(anyhow::anyhow!(
                 "Size of the packet out of bound"
             )));
@@ -145,10 +169,13 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
                         let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(&k)
                             .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
                         hmac.update(&self.buffer[..self.ciphertext_w_nonce_size]);
-                        let hash = hmac.finalize().into_bytes().to_vec();
-                        if &hash != &self.buffer[self.ciphertext_w_nonce_size..] {
-                            return Err(RecvHandlerError::HmacError(anyhow::anyhow!("Hash generated is different from the hash provided, the sender doesn't have the right hmac secret key")));
-                        }
+                        hmac.verify_slice(&self.buffer[self.ciphertext_w_nonce_size..])
+                            .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
+                        // TODO:
+                        // let hash = hmac.finalize().into_bytes().to_vec();
+                        // if &hash != &self.buffer[self.ciphertext_w_nonce_size..] {
+                        //     return Err(RecvHandlerError::HmacError(anyhow::anyhow!("Hash generated is different from the hash provided, the sender doesn't have the right hmac secret key")));
+                        // }
                     }
                     // FIX: needs refactoring
                     None => { /*This sholud not happen*/ }
@@ -209,6 +236,10 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
         self.hmac_secret_key = Some(k);
         Ok(())
     }
+
+    pub fn import_seq_number(&mut self, number: u32) {
+        self.seq_number = Some(number);
+    }
 }
 
 #[derive(thiserror::Error)]
@@ -249,6 +280,8 @@ pub struct WriteHandler<T: AsyncWrite + Unpin + Send> {
     writer: T,
     cipher: Option<AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>>,
     hmac_secret_key: Option<[u8; HMAC_KEY_SIZE]>,
+    seq_number: Option<u32>,
+    seq_num_size: usize,
     rng: OsRng,
 }
 
@@ -265,6 +298,8 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
             writer,
             cipher: None,
             hmac_secret_key: None,
+            seq_number: None,
+            seq_num_size: SEQ_NUM_SIZE,
             rng: OsRng::default(),
         }
     }
@@ -352,7 +387,7 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
     async fn prepare_packet(&mut self, msg: &[u8]) -> Result<usize, WriteHandlerError> {
         self.cursor = 0;
         let size = msg.len();
-        if size > self.plaintext_size - self.pbuffer_prefix_size {
+        if size > self.plaintext_size - self.pbuffer_prefix_size - self.seq_num_size {
             return Err(WriteHandlerError::MalformedPacket(anyhow::anyhow!(
                 "Message to be sent is too long."
             )));
@@ -367,6 +402,24 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
         for &i in size_bytes.iter() {
             self.buffer[self.cursor] = i;
             self.cursor = self.cursor + 1;
+        }
+        match self.seq_number {
+            Some(sn) => {
+                let seq_num_bytes = Vec::from(sn.to_string().as_bytes());
+                let len_seq_num_bytes = seq_num_bytes.len();
+                while self.cursor
+                    < self.pbuffer_prefix_size + (self.seq_num_size - len_seq_num_bytes)
+                {
+                    self.buffer[self.cursor] = b'0';
+                    self.cursor = self.cursor + 1;
+                }
+                for &i in seq_num_bytes.iter() {
+                    self.buffer[self.cursor] = i;
+                    self.cursor = self.cursor + 1;
+                }
+                self.seq_number = Some(sn.wrapping_add(1))
+            }
+            None => {}
         }
         for &i in msg.iter() {
             self.buffer[self.cursor] = i;
@@ -405,6 +458,9 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
         k.copy_from_slice(key);
         self.hmac_secret_key = Some(k);
         Ok(())
+    }
+    pub fn import_seq_number(&mut self, number: u32) {
+        self.seq_number = Some(number);
     }
 }
 
