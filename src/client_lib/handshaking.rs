@@ -210,13 +210,8 @@ async fn key_exchange(
     hmac.update(pub_rsa_key_str.as_bytes());
     hmac.verify_slice(&res)?;
 
-    let cipher = Aes256Gcm::new(&aes_key);
-    write_handler.import_cipher(cipher.clone());
-    read_handler.import_cipher(cipher);
-    write_handler.import_hamc_key(&hmac_secret_key)?;
-    read_handler.import_hamc_key(&hmac_secret_key)?;
-    write_handler.import_seq_number(seq_num);
-    read_handler.import_seq_number(seq_num);
+    write_handler.import_safety_tools(&aes_key, &hmac_secret_key, seq_num)?;
+    read_handler.import_safety_tools(&aes_key, &hmac_secret_key, seq_num)?;
 
     Ok(())
 }

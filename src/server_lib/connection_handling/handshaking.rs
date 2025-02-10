@@ -274,17 +274,12 @@ async fn key_exchange(
         .await
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
 
-    let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(&aes_key);
-    write_handler.import_cipher(cipher.clone());
-    read_handler.import_cipher(cipher);
     write_handler
-        .import_hamc_key(hmac_secret_key)
-        .map_err(|e| HandshakeError::Fatal(e))?;
+        .import_safety_tools(&aes_key, &hmac_secret_key, seq_num)
+        .map_err(HandshakeError::Fatal)?;
     read_handler
-        .import_hamc_key(hmac_secret_key)
-        .map_err(|e| HandshakeError::Fatal(e))?;
-    write_handler.import_seq_number(seq_num);
-    read_handler.import_seq_number(seq_num);
+        .import_safety_tools(&aes_key, &hmac_secret_key, seq_num)
+        .map_err(HandshakeError::Fatal)?;
 
     Ok(())
 }

@@ -11,10 +11,13 @@ use aes_gcm::{
         cipher::typenum::{UInt, UTerm},
         Aes256,
     },
-    AeadCore, Aes256Gcm, AesGcm,
+    AeadCore, Aes256Gcm, AesGcm, KeyInit,
 };
 use anyhow::Context;
-use hmac::{digest::InvalidLength, Hmac, Mac};
+use hmac::{
+    digest::{generic_array::GenericArray, InvalidLength},
+    Hmac, Mac,
+};
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -47,12 +50,11 @@ pub struct RecvHandler<T: AsyncRead + Unpin + Send> {
     ciphertext_w_nonce_size_and_hmac: usize,
     ciphertext_size: usize,
     reader: T,
-    cipher: Option<AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>>,
-    hmac_secret_key: Option<[u8; HMAC_KEY_SIZE]>,
-    seq_number: Option<u32>,
+    s_tools: Option<SafetyTools>,
     seq_num_size: usize,
 }
 
+/// FIX: code duplication
 impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
     pub fn new(reader: T) -> Self {
         Self {
@@ -64,9 +66,7 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
             ciphertext_w_nonce_size_and_hmac: CIPTEXT_W_NONCE_SIZE_AND_HASH,
             ciphertext_size: CIPTEXT_SIZE,
             reader,
-            cipher: None,
-            hmac_secret_key: None,
-            seq_number: None,
+            s_tools: None,
             seq_num_size: SEQ_NUM_SIZE,
         }
     }
@@ -81,7 +81,7 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
     pub async fn recv_str(&mut self, line: &mut String) -> Result<(), RecvHandlerError> {
         line.clear();
         // Decide the size of the packet
-        let buffer_size = match &self.cipher {
+        let buffer_size = match &self.s_tools {
             Some(_) => self.ciphertext_w_nonce_size_and_hmac,
             None => self.plaintext_size,
         };
@@ -93,9 +93,8 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
         let size = self.validate_packet()?;
 
         // TODO: we may make it more efficient
-        let l =
-            str::from_utf8(&self.buffer[self.cursor..self.cursor + size])
-                .context("Line sent contained invalid UTF-8")?;
+        let l = str::from_utf8(&self.buffer[self.cursor..self.cursor + size])
+            .context("Line sent contained invalid UTF-8")?;
         *line = l.to_string();
         if size != line.len() {
             return Err(RecvHandlerError::MalformedPacket(anyhow::anyhow!(
@@ -114,19 +113,19 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
             .parse()
             .context("Malformed size prefix")?;
         self.cursor = self.pbuffer_prefix_size;
-        match self.seq_number {
-            Some(sn) => {
+        match &mut self.s_tools {
+            Some(s_tools) => {
                 let recv_sec_num: u32 =
                     str::from_utf8(&self.buffer[self.cursor..self.cursor + self.seq_num_size])
                         .context("Malformed seq number")?
                         .parse()
                         .context("Malformed seq number")?;
-                if recv_sec_num != sn {
+                if recv_sec_num != s_tools.seq_number {
                     return Err(RecvHandlerError::MalformedPacket(anyhow::anyhow!(
                         "Malformed seq number"
                     )));
                 }
-                self.seq_number = Some(sn.wrapping_add(1));
+                s_tools.seq_number = s_tools.seq_number.wrapping_add(1);
                 self.cursor = self.cursor + self.seq_num_size;
             }
             None => {}
@@ -162,28 +161,18 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
 
     /// # `recv_str`'s helper function
     fn decipher_packet(&mut self) -> Result<(), RecvHandlerError> {
-        match &self.cipher {
-            Some(c) => {
-                match self.hmac_secret_key {
-                    Some(k) => {
-                        let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(&k)
-                            .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
-                        hmac.update(&self.buffer[..self.ciphertext_w_nonce_size]);
-                        hmac.verify_slice(&self.buffer[self.ciphertext_w_nonce_size..])
-                            .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
-                        // TODO:
-                        // let hash = hmac.finalize().into_bytes().to_vec();
-                        // if &hash != &self.buffer[self.ciphertext_w_nonce_size..] {
-                        //     return Err(RecvHandlerError::HmacError(anyhow::anyhow!("Hash generated is different from the hash provided, the sender doesn't have the right hmac secret key")));
-                        // }
-                    }
-                    // FIX: needs refactoring
-                    None => { /*This sholud not happen*/ }
-                }
+        match &self.s_tools {
+            Some(s_tools) => {
+                let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(&s_tools.hmac_key)
+                    .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
+                hmac.update(&self.buffer[..self.ciphertext_w_nonce_size]);
+                hmac.verify_slice(&self.buffer[self.ciphertext_w_nonce_size..])
+                    .map_err(|e| RecvHandlerError::HmacError(e.into()))?;
 
                 let nonce = &self.buffer[self.ciphertext_size..self.ciphertext_w_nonce_size];
 
-                let buffer = &c
+                let buffer = &s_tools
+                    .aes_cipher
                     .decrypt(nonce.into(), &self.buffer[..self.ciphertext_size])
                     .map_err(|e| RecvHandlerError::EncryptionError(anyhow::anyhow!(e)))?;
 
@@ -218,27 +207,29 @@ impl<T: AsyncRead + Unpin + Send> RecvHandler<T> {
 
         Ok(vec)
     }
-    pub fn import_cipher(
+
+    pub fn import_safety_tools(
         &mut self,
-        cipher: AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
-    ) {
-        self.cipher = Some(cipher)
-    }
-
-    pub fn import_hamc_key(&mut self, key: &[u8]) -> Result<(), anyhow::Error> {
-        if key.len() != HMAC_KEY_SIZE {
-            return Err(anyhow::anyhow!(
-                "Provided an hmac_secret_key with wrong size, this shouldn't have happened."
-            ));
+        aes_key: &GenericArray<
+            u8,
+            UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>,
+        >,
+        hmac_key_bytes: &[u8],
+        seq_number: u32,
+    ) -> Result<(), anyhow::Error> {
+        if hmac_key_bytes.len() != 32 {
+            // This should not happen
+            return Err(anyhow::anyhow!("Hmac Key bytes has the wrong size."));
         }
-        let mut k = [0; HMAC_KEY_SIZE];
-        k.copy_from_slice(key);
-        self.hmac_secret_key = Some(k);
-        Ok(())
-    }
+        let mut hmac_key = [0; 32];
+        hmac_key.copy_from_slice(hmac_key_bytes);
 
-    pub fn import_seq_number(&mut self, number: u32) {
-        self.seq_number = Some(number);
+        self.s_tools = Some(SafetyTools {
+            aes_cipher: Aes256Gcm::new(aes_key),
+            hmac_key,
+            seq_number,
+        });
+        Ok(())
     }
 }
 
@@ -278,9 +269,7 @@ pub struct WriteHandler<T: AsyncWrite + Unpin + Send> {
     ciphertext_w_nonce_size: usize,
     ciphertext_w_nonce_size_and_hmac: usize,
     writer: T,
-    cipher: Option<AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>>,
-    hmac_secret_key: Option<[u8; HMAC_KEY_SIZE]>,
-    seq_number: Option<u32>,
+    s_tools: Option<SafetyTools>,
     seq_num_size: usize,
     rng: OsRng,
 }
@@ -296,9 +285,7 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
             ciphertext_w_nonce_size: CIPTEXT_W_NONCE_SIZE,
             ciphertext_w_nonce_size_and_hmac: CIPTEXT_W_NONCE_SIZE_AND_HASH,
             writer,
-            cipher: None,
-            hmac_secret_key: None,
-            seq_number: None,
+            s_tools: None,
             seq_num_size: SEQ_NUM_SIZE,
             rng: OsRng::default(),
         }
@@ -313,30 +300,24 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
         let msg = msg.as_bytes();
         self.prepare_packet(&msg).await?;
 
-        match &self.cipher {
-            Some(c) => {
+        match &self.s_tools {
+            Some(s_tools) => {
                 let nonce = Aes256Gcm::generate_nonce(&mut self.rng);
-                let mut new_buff = c
+                let mut new_buff = s_tools
+                    .aes_cipher
                     .encrypt(&nonce, &self.buffer[..])
                     .map_err(|e| WriteHandlerError::EncryptionError(anyhow::anyhow!("{}", e)))?;
                 new_buff.extend(&nonce);
                 for i in 0..new_buff.len() {
                     self.encrypte_buffer[i] = new_buff[i];
                 }
-                match &self.hmac_secret_key {
-                    Some(k) => {
-                        let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(k)?;
-                        hmac.update(&self.encrypte_buffer[..self.ciphertext_w_nonce_size]);
-                        let hash = hmac.finalize().into_bytes();
-                        let mut index = 0;
-                        for i in self.ciphertext_w_nonce_size..self.ciphertext_w_nonce_size_and_hmac
-                        {
-                            self.encrypte_buffer[i] = hash[index];
-                            index = index + 1;
-                        }
-                    }
-                    // FIX: needs refactoring
-                    None => { /*This sholud not happen*/ }
+                let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(&s_tools.hmac_key)?;
+                hmac.update(&self.encrypte_buffer[..self.ciphertext_w_nonce_size]);
+                let hash = hmac.finalize().into_bytes();
+                let mut index = 0;
+                for i in self.ciphertext_w_nonce_size..self.ciphertext_w_nonce_size_and_hmac {
+                    self.encrypte_buffer[i] = hash[index];
+                    index = index + 1;
                 }
             }
             None => {}
@@ -350,9 +331,16 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
     /// `write_str`'s helper `send_packet`
     async fn send_packet(&mut self) -> Result<(), WriteHandlerError> {
         self.cursor = 0;
-        match self.cipher {
+        match self.s_tools {
             Some(_) => {
                 while self.cursor < self.ciphertext_w_nonce_size {
+                    self.cursor = self.cursor
+                        + self
+                            .writer
+                            .write(&self.encrypte_buffer[self.cursor..])
+                            .await?;
+                }
+                while self.cursor < self.ciphertext_w_nonce_size_and_hmac {
                     self.cursor = self.cursor
                         + self
                             .writer
@@ -366,18 +354,6 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
                         self.cursor + self.writer.write(&self.buffer[self.cursor..]).await?;
                 }
             }
-        }
-        match self.hmac_secret_key {
-            Some(_) => {
-                while self.cursor < self.ciphertext_w_nonce_size_and_hmac {
-                    self.cursor = self.cursor
-                        + self
-                            .writer
-                            .write(&self.encrypte_buffer[self.cursor..])
-                            .await?;
-                }
-            }
-            None => {}
         }
         self.writer.flush().await?;
         Ok(())
@@ -403,9 +379,9 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
             self.buffer[self.cursor] = i;
             self.cursor = self.cursor + 1;
         }
-        match self.seq_number {
-            Some(sn) => {
-                let seq_num_bytes = Vec::from(sn.to_string().as_bytes());
+        match &mut self.s_tools {
+            Some(s_tools) => {
+                let seq_num_bytes = Vec::from(s_tools.seq_number.to_string().as_bytes());
                 let len_seq_num_bytes = seq_num_bytes.len();
                 while self.cursor
                     < self.pbuffer_prefix_size + (self.seq_num_size - len_seq_num_bytes)
@@ -417,7 +393,7 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
                     self.buffer[self.cursor] = i;
                     self.cursor = self.cursor + 1;
                 }
-                self.seq_number = Some(sn.wrapping_add(1))
+                s_tools.seq_number = s_tools.seq_number.wrapping_add(1)
             }
             None => {}
         }
@@ -442,25 +418,29 @@ impl<T: AsyncWrite + Unpin + Send> WriteHandler<T> {
 
         Ok(())
     }
-    pub fn import_cipher(
+
+    pub fn import_safety_tools(
         &mut self,
-        cipher: AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
-    ) {
-        self.cipher = Some(cipher)
-    }
-    pub fn import_hamc_key(&mut self, key: &[u8]) -> Result<(), anyhow::Error> {
-        if key.len() != HMAC_KEY_SIZE {
-            return Err(anyhow::anyhow!(
-                "Provided an hmac_secret_key with wrong size, this shouldn't have happened."
-            ));
+        aes_key: &GenericArray<
+            u8,
+            UInt<UInt<UInt<UInt<UInt<UInt<UTerm, B1>, B0>, B0>, B0>, B0>, B0>,
+        >,
+        hmac_key_bytes: &[u8],
+        seq_number: u32,
+    ) -> Result<(), anyhow::Error> {
+        if hmac_key_bytes.len() != 32 {
+            // This should not happen
+            return Err(anyhow::anyhow!("Hmac Key bytes has the wrong size."));
         }
-        let mut k = [0; HMAC_KEY_SIZE];
-        k.copy_from_slice(key);
-        self.hmac_secret_key = Some(k);
+        let mut hmac_key = [0; 32];
+        hmac_key.copy_from_slice(hmac_key_bytes);
+
+        self.s_tools = Some(SafetyTools {
+            aes_cipher: Aes256Gcm::new(aes_key),
+            hmac_key,
+            seq_number,
+        });
         Ok(())
-    }
-    pub fn import_seq_number(&mut self, number: u32) {
-        self.seq_number = Some(number);
     }
 }
 
@@ -481,4 +461,10 @@ impl Debug for WriteHandlerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         error_chain_fmt(self, f)
     }
+}
+
+struct SafetyTools {
+    aes_cipher: AesGcm<Aes256, UInt<UInt<UInt<UInt<UTerm, B1>, B1>, B0>, B0>>,
+    hmac_key: [u8; 32],
+    seq_number: u32,
 }
