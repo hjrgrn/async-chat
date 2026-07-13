@@ -6,8 +6,10 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::server_lib::administration::server_commands_wrapper;
 use crate::server_lib::{settings::Settings, structs::Message};
-use crate::shared_lib::{OutputMsg, StdinRequest};
+use crate::shared_lib::graceful_shutdown::handling_sigint;
+use crate::shared_lib::{display_output, OutputMsg, StdinRequest};
 
 use self::id_record::id_record;
 pub use self::structs::{ConnHandlerIdRecordMsg, IdRecordRunMsg, RunIdRecordMsg};
@@ -18,30 +20,37 @@ mod id_record;
 pub mod settings;
 mod structs;
 
-/// # `run`'s wrapper
-///
-/// Wrapper for `run` that allows to listen for graceful shutdown call.
-///
+/// # `run` wrapper
+/// Initializes the application. Spawns threads dedicated to:
+/// - displaying server-side output
+/// - handling graceful shutdown
+/// - administration
+/// - executing the main application logic
 ///
 /// ## Parameters
-///
-/// - `con_hand_id_tx` -> sender channel used to communicate with `id_record`, the user manager: connection_handler to
-/// id_record.
-/// - `con_hand_id_rx` -> receiver channel used to communicate with id_record: connection_handler
-/// to id_record
-/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-/// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
-/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
-pub async fn run_wrapper(
-    settings: Settings,
-    con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
-    con_hand_id_rx: mpsc::Receiver<ConnHandlerIdRecordMsg>,
-    output_tx: mpsc::Sender<OutputMsg>,
-    stdin_req_tx: mpsc::Sender<StdinRequest>,
-    ctoken: CancellationToken,
-    shared_secret: SecretString,
-) {
+/// - `settings`: The application configuration.
+/// - `shared_secret`: The secret required to authenticate users during the handshake.
+pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
+    // Cancellation token for graceful shutdown.
+    let ctoken = CancellationToken::new();
+
+    // Spawn the function that allow the output of the server to be displayed.
+    let (output_tx, output_rx) = mpsc::channel::<OutputMsg>(10);
+    tokio::spawn(display_output(output_rx, ctoken.clone()));
+
+    // Spawn the function that handles graceful shutdown.
+    tokio::spawn(handling_sigint(ctoken.clone(), output_tx.clone()));
+
+    // Spawn the function that allow the admin to communicate with the server.
+    let (con_hand_id_tx, con_hand_id_rx) = mpsc::channel::<ConnHandlerIdRecordMsg>(10);
+    let (stdin_req_tx, stdin_req_rx) = mpsc::channel::<StdinRequest>(10);
+    tokio::spawn(server_commands_wrapper(
+        con_hand_id_tx.clone(),
+        stdin_req_rx,
+        output_tx.clone(),
+        ctoken.clone(),
+    ));
+
     tokio::select! {
         _ = ctoken.cancelled() => {}
         res = run(
@@ -178,7 +187,7 @@ async fn run(
                     con_hand_id_tx1,
                     output_tx.clone(),
                     ctoken.clone(),
-                    shared_secret.clone()
+                    shared_secret.clone(),
                 ));
             }
             IdRecordRunMsg::IsThereSpace(false) => {
