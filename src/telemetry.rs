@@ -2,7 +2,7 @@ use tracing::{subscriber::set_global_default, Subscriber};
 use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt, EnvFilter, Registry};
 
-/// Compose multiple layers into a `tracing`'s subscriber
+/// Compose multiple layers into a `tracing`'s subscriber.
 pub fn get_subscriber<Sink>(
     name: String,
     env_filter: String,
@@ -18,7 +18,7 @@ where
         name, sink, // Output the formatted span to our sink.
     );
 
-    // Compose all the different tracing layers into a single subscriber
+    // Compose all the different tracing layers into a single subscriber.
     Registry::default()
         .with(env_filter)
         .with(JsonStorageLayer)
