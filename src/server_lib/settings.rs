@@ -20,6 +20,7 @@ impl Settings {
 }
 
 pub fn get_settings() -> Result<Settings, Box<dyn Error>> {
+    // TODO: a proper config path.
     let path = env::current_dir()?.join("configuration").join("ServerSettings.toml");
     let settings = Config::builder()
         .add_source(config::File::from(path))
