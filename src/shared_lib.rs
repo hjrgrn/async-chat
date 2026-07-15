@@ -18,8 +18,8 @@ pub mod socket_handling;
 ///
 /// ## Params
 ///
-/// - `receiver` -> Cannel used to receive messages to display
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// - `receiver`: Channel used to receive messages that will be displayed.
+/// - `ctoken`: Cancellation token used to communicate the shutdown.
 #[tracing::instrument(name = "Displaying output", skip(receiver, ctoken))]
 pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: CancellationToken) {
     loop {
@@ -30,17 +30,11 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
             res = receiver.recv() => {
                 match res {
                     Some(msg) => {
-                        match msg.payload {
-                            Some(m) => {
-                                println!("{}", m);
-                            }
-                            _ => {}
+                        if let Some(m) = msg.payload {
+                            println!("{m}");
                         }
-                        match msg.error {
-                            Some(m) => {
-                                eprintln!("{}", m);
-                            }
-                            _ => {}
+                        if let Some(e) = msg.error {
+                            eprintln!("{e}");
                         }
                     },
                     None => {
