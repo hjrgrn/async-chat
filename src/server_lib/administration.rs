@@ -13,17 +13,18 @@ use super::ConnHandlerIdRecordMsg;
 
 /// # `server_commands_wrapper`
 ///
-/// Wrapper for `server_commands` that allows to listen for graceful shutdown call.
+/// Wrapper for `server_commands` that allows graceful shutdown.
 ///
 /// ## Parameters
 ///
-/// - `comm_tx` -> sends messages to connection handlers so that messages can be sent to the clients
-/// and visualized by them
-/// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
-/// input from stdin it sends said input through this channel and `server_commands` will respont to
-/// it.
-/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// - `comm_tx`: Sends messages to connection handlers so that messages can be
+///   sent to the clients and visualized by them.
+/// - `req_rx`: Receives requests about reading from stdin. When a function needs
+///   an input from STDIN, it sends said input through this channel, and
+///   `server_commands` will respont to it.
+/// - `output_tx`: This channel is used to send the output of the server to the
+///   display facility.
+/// - `ctoken`: Cancellation token used to communicate the shutdown.
 pub async fn server_commands_wrapper(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     req_rx: mpsc::Receiver<StdinRequest>,
@@ -46,25 +47,30 @@ pub async fn server_commands_wrapper(
 
 /// # `server_commands`
 ///
-/// Handles inputs from stdin.
-/// Receives request for reading from stdin through `req_rx`, at the same time allows the user to
-/// type.
-/// After the user finished typing, if there is a pending request to stdin the content written by
-/// the user will be sent to the requester through the oneshot channel inside `StdinRequest`; if
-/// there are no requests pending the content will be sent to `id_record` through `comm_tx`,
-/// becouse it is assumed to be a command issued by the admin.
-/// The command `SERVER_COM` will be sent directly to the function that displays the output through
-/// `output_tx`.
+/// Handles inputs from STDIN.
+///
+/// Receives request for input from STDIN through `req_rx`, at the same time
+/// allows the admin to type.
+/// After the user finishes typing, if there is a pending request to stdin the
+/// content written by the user will be sent to the requester through the oneshot
+/// channel inside `StdinRequest`; if there are no requests pending the content
+/// will be sent to `id_record` through `comm_tx`, because it is assumed to be
+/// a command issued by the admin. The command `SERVER_COM` will be sent directly
+/// to the function that displays the output through`output_tx`.
 ///
 /// ## Parameters
 ///
-/// - `comm_tx` -> sends messages to connection handler so that messages can be sent to the clients
-/// and visualized by them
-/// - `req_rx` -> receives requests about reading from stdin, when a part of the program needs an
-/// input from stdin it sends said input through this channel and `server_commands` will respont to
-/// it.
-/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-#[tracing::instrument(name = "Receiving commands from user", skip(comm_tx, req_rx, output_tx))]
+/// - `comm_tx`: Sends messages to connection handlers so that messages can be
+///   sent to the clients and visualized by them.
+/// - `req_rx`: Receives requests about reading from stdin. When a function needs
+///   an input from STDIN, it sends said input through this channel, and
+///   `server_commands` will respont to it.
+/// - `output_tx`: This channel is used to send the output of the server to the
+///   display facility.
+#[tracing::instrument(
+    name = "Receiving commands from user",
+    skip(comm_tx, req_rx, output_tx)
+)]
 async fn server_commands(
     comm_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     mut req_rx: mpsc::Receiver<StdinRequest>,
@@ -93,9 +99,9 @@ async fn server_commands(
                     None => {
                         // all senders have been dropped
                         let _ = output_tx
-                            .send(OutputMsg::new_error(format!(
-                                "All senders for `server_commands` has been dropped.",
-                            )))
+                            .send(OutputMsg::new_error(
+                                "All senders for `server_commands` has been dropped.".to_string(),
+                            ))
                             .await;
                         break;
                     }
@@ -104,11 +110,9 @@ async fn server_commands(
             }
         }
 
-        if content.trim().len() < 1 {
+        if content.trim().is_empty() {
             content.clear();
-        }
-
-        if content.len() > 0 {
+        } else {
             if content == SERVER_COM {
                 if output_tx.send(OutputMsg::new(COMMANDS)).await.is_err() {
                     break;
