@@ -51,12 +51,12 @@ pub async fn server_commands_wrapper(
 ///
 /// Receives request for input from STDIN through `req_rx`, at the same time
 /// allows the admin to type.
-/// After the user finishes typing, if there is a pending request to stdin the
-/// content written by the user will be sent to the requester through the oneshot
+/// After the admin finishes typing, if there is a pending request to stdin the
+/// content written by the admin will be sent to the requester through the oneshot
 /// channel inside `StdinRequest`; if there are no requests pending the content
 /// will be sent to `id_record` through `comm_tx`, because it is assumed to be
 /// a command issued by the admin. The command `SERVER_COM` will be sent directly
-/// to the function that displays the output through`output_tx`.
+/// to the function that displays the output through `output_tx`.
 ///
 /// ## Parameters
 ///
@@ -97,7 +97,7 @@ async fn server_commands(
                 let r = match res {
                     Some(r) => {r}
                     None => {
-                        // all senders have been dropped
+                        // All senders have been dropped.
                         let _ = output_tx
                             .send(OutputMsg::new_error(
                                 "All senders for `server_commands` has been dropped.".to_string(),
@@ -114,6 +114,7 @@ async fn server_commands(
             content.clear();
         } else {
             if content == SERVER_COM {
+                // Display admin commands.
                 if output_tx.send(OutputMsg::new(COMMANDS)).await.is_err() {
                     break;
                 }
@@ -125,17 +126,18 @@ async fn server_commands(
                                 match channel.send(content.clone()) {
                                     Ok(_) => {}
                                     Err(_) => {
-                                        // The channle of the stdin request has been closed, meaning
+                                        // The channel of the STDIN request has been closed, meaning
                                         // the input is not required anymore, so we either display
                                         // it or, if there is another request pending, we satisfy
-                                        // the other request
+                                        // the other request.
                                         continue;
                                     }
                                 }
                             }
                         },
                         None => {
-                            // send commands
+                            // There are no requests pending, so this must be the admin wanting to
+                            // send a command.
                             let msg = ConnHandlerIdRecordMsg::ServerCommand(content.clone());
                             if comm_tx.send(msg).await.is_err() {
                                 break 'outer;
