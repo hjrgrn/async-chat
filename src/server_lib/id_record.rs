@@ -45,18 +45,8 @@ mod auxiliaries;
 /// - `output_tx` -> this channel is used to send the output of the server to a third entity.
 /// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
 /// - `ctoken` -> Cancellation token used to communicate the shutdown
-#[tracing::instrument(
-    name = "Id record thread is running",
-    skip(
-        max_connections,
-        run_com_rx,
-        run_com_tx,
-        con_hand_rx,
-        con_hand_tx,
-        output_tx,
-        ctoken
-    )
-)]
+#[allow(clippy::too_many_arguments)] // TODO: solve this
+#[tracing::instrument(name = "Id record thread is running", skip_all)]
 pub async fn id_record(
     max_connections: usize,
     mut run_com_rx: Receiver<RunIdRecordMsg>,
@@ -78,7 +68,7 @@ pub async fn id_record(
                     Some(m) => {m},
                     None => {
                         let msg = "id_record is unable to communicate with `run`";
-                        let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                        let _ = output_tx.send(OutputMsg::new_error(msg)).await;
                         tracing::error!("{}", msg);
                         break;
                     }
@@ -98,7 +88,7 @@ pub async fn id_record(
                     Some(m) => {m}
                     None => {
                         let msg = "id_record is unable to communicate with `run`";
-                        let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                        let _ = output_tx.send(OutputMsg::new_error(msg)).await;
                         tracing::error!("{}", msg);
                         break;
                     }

@@ -29,14 +29,7 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
             }
             res = receiver.recv() => {
                 match res {
-                    Some(msg) => {
-                        if let Some(m) = msg.payload {
-                            println!("{m}");
-                        }
-                        if let Some(e) = msg.error {
-                            eprintln!("{e}");
-                        }
-                    },
+                    Some(msg) => msg.print(),
                     None => {
                         // Channel has been closed, meaning the application can't work anymore
                         tracing::error!("`display_output` can't receive messages anymore.");
@@ -55,23 +48,24 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
 ///
 /// Object used to communicate a message to `display_output`,
 /// it may contain a payload and an error.
-pub struct OutputMsg {
-    pub payload: Option<String>,
-    pub error: Option<String>,
+pub enum OutputMsg {
+    Payload(String),
+    Error(String),
 }
 
 impl OutputMsg {
     pub fn new<T: Display + Debug>(payload: T) -> Self {
-        Self {
-            payload: Some(format!("{}", payload)),
-            error: None,
-        }
+        Self::Payload(payload.to_string())
     }
 
     pub fn new_error<T: Display + Debug>(error: T) -> Self {
-        Self {
-            payload: None,
-            error: Some(format!("{}", error)),
+        Self::Error(error.to_string())
+    }
+
+    pub fn print(&self) {
+        match self {
+            OutputMsg::Payload(p) => println!("{p}"),
+            OutputMsg::Error(e) => eprintln!("{e}"),
         }
     }
 }
