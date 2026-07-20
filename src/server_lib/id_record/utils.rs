@@ -23,9 +23,13 @@ use crate::server_lib::structs::{
 
 /// # `id_record`'s helper `receiving_from_run`
 ///
-/// Checks if there is enough space to accept a new connection and communicates that to
-/// `run`. Returns nothing if successful; otherwise, returns a fatal error requiring the application
-/// to shutdown.
+/// Responds to messages sent by `run`.
+///
+/// Returns nothing if successful; otherwise, returns a fatal error requiring
+/// the application to shutdown.
+///
+/// **NOTE**: At the moment it only checks if there is enough space to accept a
+/// new connection and communicates that to `run`.
 ///
 /// ## Parameters
 ///
