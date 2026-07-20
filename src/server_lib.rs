@@ -84,14 +84,14 @@ pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
 ///
 /// ## Parameters
 ///
-/// - `con_hand_id_tx` -> sender channel used to communicate with `id_record`, the user manager: connection_handler to
+/// - `con_hand_id_tx`: sender channel used to communicate with `id_record`, the user manager: connection_handler to
 /// id_record.
-/// - `con_hand_id_rx` -> receiver channel used to communicate with id_record: connection_handler
+/// - `con_hand_id_rx`: receiver channel used to communicate with id_record: connection_handler
 /// to id_record
-/// - `output_tx` -> this channel is used to send the output of the server to a third entity.
-/// - `stdin_req_tx` -> channel used to request information from stdin through `StdinRequest`.
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
-/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
+/// - `output_tx`: this channel is used to send the output of the server to a third entity.
+/// - `stdin_req_tx`: channel used to request information from stdin through `StdinRequest`.
+/// - `ctoken`: Cancellation token used to communicate the shutdown
+/// - `shared_secret`: Secret needed for authenticate the users during handshake.
 #[tracing::instrument(
     name = "Server is running",
     skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx, shared_secret)
@@ -114,15 +114,16 @@ async fn run(
         }
     };
 
-    // IdRecord
-    // channels
-    // run to id_record
+    // IdRecord channel
+    //
+    // Run to id_record.
     let (run_id_com_tx, run_id_com_rx) = mpsc::channel::<RunIdRecordMsg>(10);
-    // id_record to run
+    // id_record to run.
     let (id_run_com_tx, mut id_run_com_rx) = mpsc::channel::<IdRecordRunMsg>(10);
 
     // Server channel
-    // internal communication between `connection_handler`s
+    //
+    // Internal communication between `connection_handler`s
     let (int_com_tx, _) = broadcast::channel::<Message>(10);
     let id_msg_tx1 = int_com_tx.clone();
 
@@ -134,6 +135,8 @@ async fn run(
         }
     };
 
+    // TODO: this should spawn in the caller
+    // FROMHERE:
     tokio::spawn(id_record(
         settings.get_max_connections(),
         run_id_com_rx,
@@ -173,7 +176,7 @@ async fn run(
             Some(i) => i,
             None => {
                 let msg = "Failed to reciver from `id_record` in `run`";
-                let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
+                let _ = output_tx.send(OutputMsg::new_error(msg)).await;
                 return Err(anyhow::anyhow!(msg));
             }
         };

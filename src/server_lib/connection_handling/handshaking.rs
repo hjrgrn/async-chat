@@ -219,6 +219,7 @@ async fn key_exchange(
             "Malformed packet received during key_exchange."
         )));
     }
+    // NOTE: split at checked is reduntand since `res.len() == 184`
     let (received_nonce, hash_key_seq) =
         res.split_at_checked(24)
             .ok_or(HandshakeError::NonFatal(anyhow::anyhow!(

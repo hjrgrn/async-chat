@@ -50,6 +50,7 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
 /// it may contain a payload and an error.
 pub enum OutputMsg {
     Payload(String),
+    // TODO: Error implementor instead of String.
     Error(String),
 }
 
