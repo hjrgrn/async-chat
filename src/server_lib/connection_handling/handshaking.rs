@@ -3,12 +3,8 @@
 //! Module that contains code relative to the Handshaking procedure, submodule of
 //! `connection_handling`.
 
-use crate::globals::{
-    CONNECTION_ACCEPTED, MALFORMED_PACKET, MAX_LEN, MAX_TRIES, TAKEN, TOO_LONG, TOO_MANY_TRIES,
-    TOO_SHORT,
-};
+use crate::globals::{MALFORMED_PACKET, MAX_LEN, TAKEN, TOO_LONG, TOO_SHORT};
 use crate::server_lib::structs::CommandFromIdRecord;
-use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use core::str;
@@ -25,10 +21,10 @@ use std::char;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use tokio::io::{BufReader, BufWriter};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
-use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler};
+use super::super::structs::{Client, IdRecordConnHandler};
 
 /// # `handshake`
 ///
@@ -56,119 +52,82 @@ use super::super::structs::{Client, ConnHandlerIdRecordMsg, IdRecordConnHandler}
 ///
 /// client name, channel for receiving messages from `id_record` and channle
 /// for receiving commands from `id_record`
+// XXX: comment
 pub async fn handshake(
-    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
-    read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
-    addr: SocketAddr,
-    int_com_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
-    output_tx: &mpsc::Sender<OutputMsg>,
-    shared_secret: SecretString,
+    clients: &[Client],
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
+    addr: &SocketAddr,
+    shared_secret: &SecretString,
 ) -> Result<
     (
-        String,
+        Client,
         mpsc::Receiver<IdRecordConnHandler>,
         mpsc::Receiver<CommandFromIdRecord>,
     ),
     HandshakeError,
 > {
     let mut nick = String::new();
-    let mut counter: u8 = 0;
-    let (req_tx, mut req_rx) = mpsc::channel(10);
-    let (mut command_tx, mut command_rx);
+    let (req_tx, req_rx) = mpsc::channel(10);
+    let (command_tx, command_rx);
 
     key_exchange(write_handler, read_handler, shared_secret).await?;
 
-    loop {
-        counter += 1;
-
-        if counter > MAX_TRIES {
-            write_handler
-                .write_str(TOO_MANY_TRIES)
-                .await
-                .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-            return Err(HandshakeError::NonFatal(anyhow::anyhow!(
-                "User have tried to register too many times without success"
-            )));
-        }
-
-        match read_handler.recv_str(&mut nick).await {
-            Ok(_) => {
-                nick = String::from(nick.trim());
-                let len = nick.len();
-                if len > MAX_LEN {
-                    write_handler
-                        .write_str(TOO_LONG)
-                        .await
-                        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-                    continue;
-                } else if len < 3 {
-                    write_handler
-                        .write_str(TOO_SHORT)
-                        .await
-                        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-                    continue;
-                } else {
-                    (command_tx, command_rx) = mpsc::channel::<CommandFromIdRecord>(10);
-                    let new_client =
-                        Client::new(nick.clone(), addr.clone(), req_tx.clone(), command_tx);
-                    let req = ConnHandlerIdRecordMsg::AcceptanceRequest(new_client);
-                    int_com_tx
-                        .send(req)
-                        .await
-                        .map_err(|e| HandshakeError::Fatal(e.into()))?;
-                    let accepted = match req_rx.recv().await {
-                        Some(a) => a,
-                        None => {
-                            let msg = "Unable to communicate with id_record properly from handshake, this shouldn't have happened";
-                            let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
-                            return Err(HandshakeError::Fatal(anyhow::anyhow!(msg)));
-                        }
-                    };
-                    match accepted {
-                        IdRecordConnHandler::Acceptance(res) => {
-                            if res {
-                                write_handler
-                                    .write_str(CONNECTION_ACCEPTED)
-                                    .await
-                                    .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-                                let p = format!("{} has been accepted as {}\n", addr, nick);
-                                output_tx
-                                    .send(OutputMsg::new(&p))
-                                    .await
-                                    .map_err(|e| HandshakeError::Fatal(e.into()))?;
-                                break;
-                            } else {
-                                write_handler
-                                    .write_str(TAKEN)
-                                    .await
-                                    .map_err(|e| HandshakeError::NonFatal(e.into()))?;
-                                continue;
-                            }
-                        }
-                        _ => {
-                            let msg = "Unexpected response from `id_record` in `handshake`, this shouldn't have happend.";
-                            let _ = output_tx.send(OutputMsg::new_error(&msg)).await;
-                            return Err(HandshakeError::Fatal(anyhow::anyhow!(msg)));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                match e {
-                    RecvHandlerError::MalformedPacket(_) => {
+    match read_handler.recv_str(&mut nick).await {
+        Ok(_) => {
+            nick = String::from(nick.trim());
+            let len = nick.len();
+            if len > MAX_LEN {
+                write_handler
+                    .write_str(TOO_LONG)
+                    .await
+                    .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+                return Err(HandshakeError::NonFatal(anyhow::anyhow!("TODO:")));
+            } else if len < 3 {
+                write_handler
+                    .write_str(TOO_SHORT)
+                    .await
+                    .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+                return Err(HandshakeError::NonFatal(anyhow::anyhow!("TODO:")));
+            } else {
+                for client in clients.iter() {
+                    if nick == client.nick {
                         write_handler
-                            .write_str(MALFORMED_PACKET)
+                            .write_str(TAKEN)
                             .await
                             .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+                        return Err(HandshakeError::NonFatal(anyhow::anyhow!("TODO:")));
                     }
-                    _ => {}
+                    if *addr == client.addr {
+                        write_handler
+                            // TODO: we may want something else, like `ALREADY_CONNECTED`.
+                            .write_str(TAKEN)
+                            .await
+                            .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+                        return Err(HandshakeError::NonFatal(anyhow::anyhow!("TODO:")));
+                    }
                 }
-                return Err(HandshakeError::NonFatal(e.into()));
             }
         }
+        Err(e) => {
+            match e {
+                RecvHandlerError::MalformedPacket(_) => {
+                    write_handler
+                        .write_str(MALFORMED_PACKET)
+                        .await
+                        .map_err(|e| HandshakeError::NonFatal(e.into()))?;
+                }
+                _ => {}
+            }
+            return Err(HandshakeError::NonFatal(e.into()));
+        }
     }
-
-    Ok((nick, req_rx, command_rx))
+    (command_tx, command_rx) = mpsc::channel::<CommandFromIdRecord>(10);
+    Ok((
+        Client::new(nick.clone(), addr.clone(), req_tx, command_tx),
+        req_rx,
+        command_rx,
+    ))
 }
 
 /// # `handshake`'s helper `key_exchange`
@@ -178,10 +137,11 @@ pub async fn handshake(
 /// the handlers.
 /// This function may return an error that can be fatal, in this case the
 /// application needs to shutdown.
+// TODO: review
 async fn key_exchange(
-    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
-    read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
-    shared_secret: SecretString,
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
+    shared_secret: &SecretString,
 ) -> Result<(), HandshakeError> {
     let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;
@@ -285,6 +245,7 @@ async fn key_exchange(
     Ok(())
 }
 
+// TODO: maybe we want different variants
 #[derive(thiserror::Error)]
 pub enum HandshakeError {
     #[error(transparent)]

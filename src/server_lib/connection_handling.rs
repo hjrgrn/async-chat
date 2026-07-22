@@ -2,47 +2,50 @@
 //!
 //! Set of functions relative to the handling of the incoming connections
 
-use auxiliaries::{ReadBranchError, WriteBranchError};
-use secrecy::SecretString;
 use std::net::SocketAddr;
 use tokio::io::{BufReader, BufWriter};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use utils::{ReadBranchError, WriteBranchError};
 
-use crate::server_lib::connection_handling::auxiliaries::{read_branch, write_branch};
-use crate::server_lib::structs::CommandFromIdRecord;
+use crate::server_lib::connection_handling::utils::{read_branch, write_branch};
+use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::shared_lib::socket_handling::{RecvHandler, WriteHandler};
-
-use self::auxiliaries::handshake_wrapper;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::structs::{ConnHandlerIdRecordMsg, Message};
 use super::OutputMsg;
 
-mod auxiliaries;
-mod handshaking;
+pub mod handshaking;
+pub mod utils;
 
 /// `connection_handler`'s wrapper
 pub async fn connection_handler_wrapper(
-    stream: TcpStream,
+    nick: String,
     addr: SocketAddr,
     int_com_tx: broadcast::Sender<Message>, // internal communication
     int_com_rx: broadcast::Receiver<Message>, // internal communication
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
     output_tx: mpsc::Sender<OutputMsg>,     // Output channel
     ctoken: CancellationToken,
-    shared_secret: SecretString, // Secret needed for authenticate the users during handshake.
+    write_handler: WriteHandler<BufWriter<OwnedWriteHalf>>,
+    read_handler: RecvHandler<BufReader<OwnedReadHalf>>,
+    id_hand_rx: mpsc::Receiver<IdRecordConnHandler>,
+    command_rx: mpsc::Receiver<CommandFromIdRecord>,
 ) {
     tokio::select! {
         _ = ctoken.cancelled() => {}
         res = connection_handler(
-                stream,
-                addr,
+                &nick,
+                &addr,
                 int_com_tx,
                 int_com_rx,
                 id_tx,
                 output_tx.clone(),
-                shared_secret,
+                write_handler,
+                read_handler,
+                id_hand_rx,
+                command_rx,
             ) => {
             match res {
                 Ok(_) => {}
@@ -70,65 +73,29 @@ pub async fn connection_handler_wrapper(
 /// - id_tx: channel for communication with id_record, transmitter
 /// - output_tx: output channel
 /// - `shared_secret` -> Secret needed for authenticate the users during handshake.
+// XXX: comment
 #[tracing::instrument(
     name = "Handling connection.",
-    skip(stream, addr, int_com_tx, int_com_rx, id_tx, output_tx, shared_secret),
+    skip_all,
     fields(
-        username = tracing::field::Empty,
+        username = %nick,
         address = %addr
     )
 )]
 async fn connection_handler(
-    mut stream: TcpStream,
-    addr: SocketAddr,
+    nick: &str,
+    addr: &SocketAddr,
     int_com_tx: broadcast::Sender<Message>,
     mut int_com_rx: broadcast::Receiver<Message>,
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
-    shared_secret: SecretString
+    mut write_handler: WriteHandler<BufWriter<OwnedWriteHalf>>,
+    mut read_handler: RecvHandler<BufReader<OwnedReadHalf>>,
+    mut id_hand_rx: mpsc::Receiver<IdRecordConnHandler>,
+    mut command_rx: mpsc::Receiver<CommandFromIdRecord>,
 ) -> Result<(), anyhow::Error> {
     // buffers
     let mut line = String::new();
-    let mut id_hand_rx;
-    let mut command_rx;
-    let nick;
-
-    let (read, write) = stream.split();
-    let reader = BufReader::new(read);
-    let writer = BufWriter::new(write);
-    let mut write_handler = WriteHandler::new(writer);
-    let mut read_handler = RecvHandler::new(reader);
-
-    match handshake_wrapper(
-        &mut write_handler,
-        &mut read_handler,
-        &id_tx,
-        &addr,
-        &output_tx,
-        shared_secret
-    )
-    .await
-    {
-        Ok((n, i, c)) => {
-            nick = n;
-            tracing::Span::current().record("username", &nick);
-            id_hand_rx = i;
-            command_rx = c;
-        }
-        Err(e) => match e {
-            handshaking::HandshakeError::NonFatal(e) => {
-                tracing::info!(
-                    "Failed to complete handshake with:\naddr: {}\nBecouse of:\n{}",
-                    addr,
-                    e
-                );
-                return Ok(());
-            }
-            handshaking::HandshakeError::Fatal(e) => {
-                return Err(e);
-            }
-        },
-    }
 
     loop {
         tokio::select! {

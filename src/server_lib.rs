@@ -1,13 +1,12 @@
 use std::net::SocketAddr;
 
-use connection_handling::connection_handler_wrapper;
 use secrecy::SecretString;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::server_lib::administration::server_commands_wrapper;
-use crate::server_lib::{settings::Settings, structs::Message};
+use crate::server_lib::settings::Settings;
 use crate::shared_lib::graceful_shutdown::handling_sigint;
 use crate::shared_lib::{display_output, OutputMsg, StdinRequest};
 
@@ -51,16 +50,37 @@ pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
         ctoken.clone(),
     ));
 
+    // IdRecord channel
+    //
+    // Run to id_record.
+    let (run_id_com_tx, run_id_com_rx) = mpsc::channel::<RunIdRecordMsg>(10);
+
+    let server_address: SocketAddr = match settings.get_full_address().parse() {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+            return;
+        }
+    };
+
+    tokio::spawn(id_record(
+        settings.clone(),
+        run_id_com_rx,
+        con_hand_id_rx,
+        con_hand_id_tx,
+        server_address,
+        output_tx.clone(),
+        stdin_req_tx.clone(),
+        ctoken.clone(),
+        shared_secret,
+    ));
+
     tokio::select! {
         _ = ctoken.cancelled() => {}
         res = run(
             settings,
-            con_hand_id_tx,
-            con_hand_id_rx,
+            run_id_com_tx,
             output_tx,
-            stdin_req_tx,
-            ctoken.clone(),
-            shared_secret,
         ) => {
             match res {
                 Ok(()) => {},
@@ -92,18 +112,14 @@ pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
 /// - `stdin_req_tx`: channel used to request information from stdin through `StdinRequest`.
 /// - `ctoken`: Cancellation token used to communicate the shutdown
 /// - `shared_secret`: Secret needed for authenticate the users during handshake.
-#[tracing::instrument(
-    name = "Server is running",
-    skip(settings, con_hand_id_tx, con_hand_id_rx, output_tx, shared_secret)
-)]
+/// XXX: run will not handle handshake and spawn connection handlers anymore, it passes everything
+/// to id_record
+#[tracing::instrument(name = "Server is running", skip_all)]
 async fn run(
     settings: Settings,
-    con_hand_id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
-    con_hand_id_rx: mpsc::Receiver<ConnHandlerIdRecordMsg>,
+    run_id_com_tx: mpsc::Sender<RunIdRecordMsg>,
+    // id_run_com_rx: mpsc::Receiver<IdRecordRunMsg>, // XXX: probably not useful anymore
     output_tx: mpsc::Sender<OutputMsg>,
-    stdin_req_tx: mpsc::Sender<StdinRequest>,
-    ctoken: CancellationToken,
-    shared_secret: SecretString,
 ) -> Result<(), anyhow::Error> {
     output_tx.send(OutputMsg::new("Listening...")).await?;
     let listener = match TcpListener::bind(&settings.get_full_address()).await {
@@ -114,48 +130,7 @@ async fn run(
         }
     };
 
-    // IdRecord channel
-    //
-    // Run to id_record.
-    let (run_id_com_tx, run_id_com_rx) = mpsc::channel::<RunIdRecordMsg>(10);
-    // id_record to run.
-    let (id_run_com_tx, mut id_run_com_rx) = mpsc::channel::<IdRecordRunMsg>(10);
-
-    // Server channel
-    //
-    // Internal communication between `connection_handler`s
-    let (int_com_tx, _) = broadcast::channel::<Message>(10);
-    let id_msg_tx1 = int_com_tx.clone();
-
-    let addr: SocketAddr = match settings.get_full_address().parse() {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-            return Err(e.into());
-        }
-    };
-
-    // TODO: this should spawn in the caller
-    // FROMHERE:
-    tokio::spawn(id_record(
-        settings.get_max_connections(),
-        run_id_com_rx,
-        id_run_com_tx,
-        con_hand_id_rx,
-        id_msg_tx1,
-        output_tx.clone(),
-        addr,
-        stdin_req_tx.clone(),
-        ctoken.clone(),
-    ));
-
     loop {
-        // internal communication between `connection_handler`s subfunctions
-        let int_com_tx1 = int_com_tx.clone();
-        let int_com_rx = int_com_tx.subscribe();
-        // communication with id_record
-        let con_hand_id_tx1 = con_hand_id_tx.clone();
-
         let (stream, addr) = match listener.accept().await {
             Ok((s, a)) => (s, a),
             Err(e) => {
@@ -165,39 +140,14 @@ async fn run(
         };
 
         // Ask if there is space to `id_record`
-        match run_id_com_tx.send(RunIdRecordMsg::IsThereSpace).await {
+        match run_id_com_tx
+            .send(RunIdRecordMsg::NewConnection { stream, addr })
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
                 return Err(e.into());
-            }
-        }
-        let is_there_space = match id_run_com_rx.recv().await {
-            Some(i) => i,
-            None => {
-                let msg = "Failed to reciver from `id_record` in `run`";
-                let _ = output_tx.send(OutputMsg::new_error(msg)).await;
-                return Err(anyhow::anyhow!(msg));
-            }
-        };
-        match is_there_space {
-            IdRecordRunMsg::IsThereSpace(true) => {
-                tokio::spawn(connection_handler_wrapper(
-                    stream,
-                    addr,
-                    int_com_tx1,
-                    int_com_rx,
-                    con_hand_id_tx1,
-                    output_tx.clone(),
-                    ctoken.clone(),
-                    shared_secret.clone(),
-                ));
-            }
-            IdRecordRunMsg::IsThereSpace(false) => {
-                tracing::info!(
-                    "Connection refused from: {}\nBecouse there was no space left.",
-                    addr
-                );
             }
         }
     }

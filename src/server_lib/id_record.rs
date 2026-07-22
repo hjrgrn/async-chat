@@ -3,16 +3,20 @@
 //! Functions relative to handling the record that keeps track of the clients connected.
 use std::net::SocketAddr;
 
+use secrecy::SecretString;
 use tokio::sync::{
     broadcast,
     mpsc::{self, Receiver, Sender},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::server_lib::id_record::utils::{receiving_from_hand, receiving_from_run};
+use crate::server_lib::{
+    id_record::utils::{receiving_from_hand, receiving_from_run},
+    settings::Settings,
+};
 
 use super::{
-    structs::{Client, ConnHandlerIdRecordMsg, IdRecordRunMsg, Message, RunIdRecordMsg},
+    structs::{Client, ConnHandlerIdRecordMsg, Message, RunIdRecordMsg},
     OutputMsg, StdinRequest,
 };
 
@@ -42,21 +46,37 @@ mod utils;
 /// - `output_tx`: Channel used to send server output to a third entity.
 /// - `stdin_req_tx`: Channel used to request information from stdin via `StdinRequest`.
 /// - `ctoken`: Cancellation token used to signal shutdown.
+// XXX: id_record will handle the entire process of accepting a new client from a stream
 #[allow(clippy::too_many_arguments)] // TODO: solve this
 #[tracing::instrument(name = "Id record thread is running", skip_all)]
 pub async fn id_record(
-    max_connections: usize,
+    settings: Settings,
     mut run_com_rx: Receiver<RunIdRecordMsg>,
-    mut run_com_tx: Sender<IdRecordRunMsg>,
-    mut con_hand_rx: Receiver<ConnHandlerIdRecordMsg>,
-    con_hand_tx: broadcast::Sender<Message>,
+    mut con_hand_id_rx: Receiver<ConnHandlerIdRecordMsg>,
+    con_hand_id_tx: Sender<ConnHandlerIdRecordMsg>,
+    server_address: SocketAddr,
     output_tx: mpsc::Sender<OutputMsg>,
-    address: SocketAddr,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
+    shared_secret: SecretString,
 ) {
+    let max_connections = settings.get_max_connections();
+    let addr: SocketAddr = match settings.get_full_address().parse() {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+            return;
+        }
+    };
     // TODO: this should probably be a map
     let mut clients: Vec<Client> = Vec::new();
+
+    // XXX: these will be used in the acceptance loop
+    // Server channel
+    //
+    // Internal communication between `connection_handler`s XXX: ?
+    let (int_com_tx, _) = broadcast::channel::<Message>(10);
+    let int_com_con_hand_tx = int_com_tx.clone();
 
     loop {
         tokio::select! {
@@ -72,7 +92,18 @@ pub async fn id_record(
                         break;
                     }
                 };
-                match receiving_from_run(&mut run_com_tx, msg, clients.len(), max_connections).await {
+                match receiving_from_run(
+                    &mut clients,
+                    msg,
+                    max_connections,
+                    addr,
+                    int_com_tx.clone(),
+                    int_com_tx.subscribe(),
+                    con_hand_id_tx.clone(),
+                    output_tx.clone(),
+                    ctoken.clone(),
+                    &shared_secret,
+                ).await {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
@@ -82,7 +113,7 @@ pub async fn id_record(
                 };
             }
             // Receiving from a connection handler.
-            opt = con_hand_rx.recv() => {
+            opt = con_hand_id_rx.recv() => {
                 let msg = match opt {
                     Some(m) => {m}
                     None => {
@@ -93,7 +124,7 @@ pub async fn id_record(
                     }
                 };
                 // FROMHERE:
-                match receiving_from_hand(msg, &mut clients, &address, &con_hand_tx, &output_tx, &stdin_req_tx).await {
+                match receiving_from_hand(msg, &mut clients, &server_address, &int_com_con_hand_tx, &output_tx, &stdin_req_tx).await {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;

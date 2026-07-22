@@ -3,23 +3,28 @@
 /// Internal functions used by the function `id_record`
 use std::net::SocketAddr;
 
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, error::SendError, Sender},
-    oneshot,
+use secrecy::SecretString;
+use tokio::{
+    io::{BufReader, BufWriter},
+    sync::{broadcast, mpsc, oneshot},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     globals::{KICK, SERVER_COM, SERVER_LIST},
     server_lib::{
+        connection_handling::{
+            connection_handler_wrapper,
+            handshaking::{self, HandshakeError},
+            utils::handshake_wrapper,
+        },
         structs::{CommandFromIdRecord, IdRecordConnHandler},
         OutputMsg, StdinRequest,
     },
+    shared_lib::socket_handling::{RecvHandler, WriteHandler},
 };
 
-use crate::server_lib::structs::{
-    Client, ConnHandlerIdRecordMsg, IdRecordRunMsg, Message, RunIdRecordMsg,
-};
+use crate::server_lib::structs::{Client, ConnHandlerIdRecordMsg, Message, RunIdRecordMsg};
 
 /// # `id_record`'s helper `receiving_from_run`
 ///
@@ -37,20 +42,81 @@ use crate::server_lib::structs::{
 /// - `msg`: Message received from `run` in the caller (`id_record`).
 /// - `actual_connections`: Number of currently connected clients.
 /// - `max_connections`: Maximum number of connections allowed.
+// XXX:
 pub async fn receiving_from_run(
-    channel: &mut Sender<IdRecordRunMsg>,
+    clients: &mut [Client],
+    // channel: &mut Sender<IdRecordRunMsg>, // XXX: probably not needed anymore
     msg: RunIdRecordMsg,
-    actual_connections: usize,
+    // XXX: rework these two
     max_connections: usize,
-) -> Result<(), SendError<IdRecordRunMsg>> {
+    addr: SocketAddr,
+    int_com_tx: broadcast::Sender<Message>, // internal communication
+    int_com_rx: broadcast::Receiver<Message>, // internal communication
+    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
+    output_tx: mpsc::Sender<OutputMsg>,     // Output channel
+    ctoken: CancellationToken,
+    shared_secret: &SecretString, // Secret needed for authenticate the users during handshake.
+) -> Result<(), HandshakeError> {
     match msg {
-        // NOTE: for now we only have `IsThereSpace`
-        RunIdRecordMsg::IsThereSpace => {
-            if actual_connections < max_connections {
-                channel.send(IdRecordRunMsg::IsThereSpace(true)).await?;
-            } else {
-                channel.send(IdRecordRunMsg::IsThereSpace(false)).await?;
+        RunIdRecordMsg::NewConnection { mut stream, addr } => {
+            if clients.len() >= max_connections {
+                return Err(HandshakeError::NonFatal(anyhow::anyhow!(
+                    "Max connection reached."
+                )));
             }
+
+            let (read, write) = stream.into_split();
+            let reader = BufReader::new(read);
+            let writer = BufWriter::new(write);
+            let mut write_handler = WriteHandler::new(writer);
+            let mut read_handler = RecvHandler::new(reader);
+            let client;
+            let mut id_hand_rx;
+            let mut command_rx;
+
+            match handshake_wrapper(
+                clients,
+                &mut write_handler,
+                &mut read_handler,
+                &addr,
+                &shared_secret,
+            )
+            .await
+            {
+                Ok((cl, id, co)) => {
+                    client = cl;
+                    id_hand_rx = id;
+                    command_rx = co;
+                }
+                Err(e) => match e {
+                    handshaking::HandshakeError::NonFatal(e) => {
+                        tracing::info!(
+                            "Failed to complete handshake with:\naddr: {}\nBecause of:\n{}",
+                            addr,
+                            e
+                        );
+                        return Ok(());
+                    }
+                    handshaking::HandshakeError::Fatal(e) => {
+                        panic!("TODO: error handling");
+                        // return Err(e);
+                    }
+                },
+            }
+
+            tokio::spawn(connection_handler_wrapper(
+                client.nick.to_string(),
+                addr,
+                int_com_tx,
+                int_com_rx,
+                id_tx,
+                output_tx,
+                ctoken,
+                write_handler,
+                read_handler,
+                id_hand_rx,
+                command_rx,
+            ));
         }
     }
     Ok(())

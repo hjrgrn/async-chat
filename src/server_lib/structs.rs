@@ -3,22 +3,24 @@
 //! Structs relatives to the server library.
 
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
+use tokio::{net::TcpStream, sync::mpsc};
 
 /// # `RunIdRecordMsg`
 ///
 /// Message that is sent from `crate::server_lib::run` to
 /// `crate::server_lib::id_record::id_record`
 pub enum RunIdRecordMsg {
-    IsThereSpace,
+    NewConnection { stream: TcpStream, addr: SocketAddr },
 }
 /// # `RunIdRecordMsg`
 ///
 /// Message that is sent from `crate::server_lib::id_record::id_record` to
 /// `crate::server_lib::run`
+// XXX: this is probably not needed anymore
 pub enum IdRecordRunMsg {
     IsThereSpace(bool),
 }
+
 /// # `ConnHandlerIdRecordMsg`
 ///
 /// Message sent from a `crate::server_lib::connection_handling::connection_handler` to
