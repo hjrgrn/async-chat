@@ -71,10 +71,7 @@ pub async fn id_record(
     // TODO: this should probably be a map
     let mut clients: Vec<Client> = Vec::new();
 
-    // XXX: these will be used in the acceptance loop
-    // Server channel
-    //
-    // Internal communication between `connection_handler`s XXX: ?
+    // Internal communication between `connection_handler`s
     let (int_com_tx, _) = broadcast::channel::<Message>(10);
     let int_com_con_hand_tx = int_com_tx.clone();
 
@@ -96,9 +93,7 @@ pub async fn id_record(
                     &mut clients,
                     msg,
                     max_connections,
-                    addr,
                     int_com_tx.clone(),
-                    int_com_tx.subscribe(),
                     con_hand_id_tx.clone(),
                     output_tx.clone(),
                     ctoken.clone(),
@@ -123,7 +118,7 @@ pub async fn id_record(
                         break;
                     }
                 };
-                // FROMHERE:
+                // FROMHERE: but first the XXXs and refactor the client
                 match receiving_from_hand(msg, &mut clients, &server_address, &int_com_con_hand_tx, &output_tx, &stdin_req_tx).await {
                     Ok(()) => {}
                     Err(e) => {

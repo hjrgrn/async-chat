@@ -14,9 +14,7 @@ use crate::{
     globals::{KICK, SERVER_COM, SERVER_LIST},
     server_lib::{
         connection_handling::{
-            connection_handler_wrapper,
-            handshaking::{self, HandshakeError},
-            utils::handshake_wrapper,
+            connection_handler_wrapper, handshaking::HandshakeError, utils::handshake_wrapper,
         },
         structs::{CommandFromIdRecord, IdRecordConnHandler},
         OutputMsg, StdinRequest,
@@ -28,37 +26,39 @@ use crate::server_lib::structs::{Client, ConnHandlerIdRecordMsg, Message, RunIdR
 
 /// # `id_record`'s helper `receiving_from_run`
 ///
-/// Responds to messages sent by `run`.
+/// Responds to requests sent by `run`, at the moment only requests of type `NewConnection` are
+/// possible.
 ///
-/// Returns nothing if successful; otherwise, returns a fatal error requiring
-/// the application to shutdown.
-///
-/// **NOTE**: At the moment it only checks if there is enough space to accept a
-/// new connection and communicates that to `run`.
+/// In case of a `NewConnection` request, the function handles the handshake protocol, and, on
+/// success, a new connection is established, and so a new client has been successfully connected to
+/// the server; this means a new `connection_handler` thread has been spawned.
 ///
 /// ## Parameters
 ///
-/// - `channel`: Sends messages to `run`.
-/// - `msg`: Message received from `run` in the caller (`id_record`).
-/// - `actual_connections`: Number of currently connected clients.
-/// - `max_connections`: Maximum number of connections allowed.
-// XXX:
+/// - clients: Set of the connected clients.
+/// - msg: Request received by `run`.
+/// - max_connections: Maximum amount of connection allowed.
+/// - int_com_tx: Transmitter used for internal communication between
+///   `connection_handler`s.
+/// - id_tx: Channle that `connection_handler`s use to send messages to id_record.
+/// - output_tx: Output channel.
+/// - ctoken: Cancellation Token.
+/// - shared_secret: Secret needed for authenticate the users during handshake.
+// NOTE: if new vairants of `RunIdRecordMsg` are added, the return value `Err(HandshakeError)` will
+// have to be changed.
 pub async fn receiving_from_run(
     clients: &mut [Client],
-    // channel: &mut Sender<IdRecordRunMsg>, // XXX: probably not needed anymore
     msg: RunIdRecordMsg,
-    // XXX: rework these two
     max_connections: usize,
-    addr: SocketAddr,
     int_com_tx: broadcast::Sender<Message>, // internal communication
-    int_com_rx: broadcast::Receiver<Message>, // internal communication
     id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>, // sending to id record
     output_tx: mpsc::Sender<OutputMsg>,     // Output channel
     ctoken: CancellationToken,
     shared_secret: &SecretString, // Secret needed for authenticate the users during handshake.
 ) -> Result<(), HandshakeError> {
+    let int_com_rx = int_com_tx.subscribe();
     match msg {
-        RunIdRecordMsg::NewConnection { mut stream, addr } => {
+        RunIdRecordMsg::NewConnection { stream, addr } => {
             if clients.len() >= max_connections {
                 return Err(HandshakeError::NonFatal(anyhow::anyhow!(
                     "Max connection reached."
@@ -70,39 +70,15 @@ pub async fn receiving_from_run(
             let writer = BufWriter::new(write);
             let mut write_handler = WriteHandler::new(writer);
             let mut read_handler = RecvHandler::new(reader);
-            let client;
-            let mut id_hand_rx;
-            let mut command_rx;
 
-            match handshake_wrapper(
+            let (client, id_hand_rx, command_rx) = handshake_wrapper(
                 clients,
                 &mut write_handler,
                 &mut read_handler,
                 &addr,
                 &shared_secret,
             )
-            .await
-            {
-                Ok((cl, id, co)) => {
-                    client = cl;
-                    id_hand_rx = id;
-                    command_rx = co;
-                }
-                Err(e) => match e {
-                    handshaking::HandshakeError::NonFatal(e) => {
-                        tracing::info!(
-                            "Failed to complete handshake with:\naddr: {}\nBecause of:\n{}",
-                            addr,
-                            e
-                        );
-                        return Ok(());
-                    }
-                    handshaking::HandshakeError::Fatal(e) => {
-                        panic!("TODO: error handling");
-                        // return Err(e);
-                    }
-                },
-            }
+            .await?;
 
             tokio::spawn(connection_handler_wrapper(
                 client.nick.to_string(),
