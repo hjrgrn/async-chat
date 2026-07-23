@@ -18,8 +18,8 @@ pub mod socket_handling;
 ///
 /// ## Params
 ///
-/// - `receiver` -> Cannel used to receive messages to display
-/// - `ctoken` -> Cancellation token used to communicate the shutdown
+/// - `receiver`: Channel used to receive messages that will be displayed.
+/// - `ctoken`: Cancellation token used to communicate the shutdown.
 #[tracing::instrument(name = "Displaying output", skip(receiver, ctoken))]
 pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: CancellationToken) {
     loop {
@@ -29,20 +29,7 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
             }
             res = receiver.recv() => {
                 match res {
-                    Some(msg) => {
-                        match msg.payload {
-                            Some(m) => {
-                                println!("{}", m);
-                            }
-                            _ => {}
-                        }
-                        match msg.error {
-                            Some(m) => {
-                                eprintln!("{}", m);
-                            }
-                            _ => {}
-                        }
-                    },
+                    Some(msg) => msg.print(),
                     None => {
                         // Channel has been closed, meaning the application can't work anymore
                         tracing::error!("`display_output` can't receive messages anymore.");
@@ -61,23 +48,25 @@ pub async fn display_output(mut receiver: mpsc::Receiver<OutputMsg>, ctoken: Can
 ///
 /// Object used to communicate a message to `display_output`,
 /// it may contain a payload and an error.
-pub struct OutputMsg {
-    pub payload: Option<String>,
-    pub error: Option<String>,
+pub enum OutputMsg {
+    Payload(String),
+    // TODO: Error implementor instead of String.
+    Error(String),
 }
 
 impl OutputMsg {
     pub fn new<T: Display + Debug>(payload: T) -> Self {
-        Self {
-            payload: Some(format!("{}", payload)),
-            error: None,
-        }
+        Self::Payload(payload.to_string())
     }
 
     pub fn new_error<T: Display + Debug>(error: T) -> Self {
-        Self {
-            payload: None,
-            error: Some(format!("{}", error)),
+        Self::Error(error.to_string())
+    }
+
+    pub fn print(&self) {
+        match self {
+            OutputMsg::Payload(p) => println!("{p}"),
+            OutputMsg::Error(e) => eprintln!("{e}"),
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::globals::{HANDSHAKE_TIMEOUT, LIST, TIMEOUT};
-use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
+use crate::server_lib::structs::{Client, CommandFromIdRecord, IdRecordConnHandler};
 use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
@@ -9,7 +9,7 @@ use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{BufReader, BufWriter};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
@@ -63,16 +63,16 @@ async fn connection_dropped<T: Display>(
 ///  the nickname of the client, the receiver that will be used to receive messages from `id_record`, the channel that will be used
 /// to receive commands from `id_record`
 /// TODO: comment
+// XXX:
 pub async fn handshake_wrapper(
-    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
-    read_handler: &mut RecvHandler<BufReader<ReadHalf<'_>>>,
-    id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
+    clients: &[Client],
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
+    read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     addr: &SocketAddr,
-    output_tx: &mpsc::Sender<OutputMsg>,
-    shared_secret: SecretString,
+    shared_secret: &SecretString,
 ) -> Result<
     (
-        String,
+        Client,
         mpsc::Receiver<IdRecordConnHandler>,
         mpsc::Receiver<CommandFromIdRecord>,
     ),
@@ -81,7 +81,7 @@ pub async fn handshake_wrapper(
     // Handshake
     tokio::select! {
         // getting the nickname
-        res = handshake(write_handler, read_handler, addr.clone(), &id_tx, output_tx, shared_secret) => {
+        res = handshake(clients, write_handler, read_handler, addr, shared_secret) => {
             return res;
         }
         // timer
@@ -278,7 +278,7 @@ async fn read_branch_n(
 pub async fn write_branch(
     res: Result<Message, RecvError>,
     addr: &SocketAddr,
-    write_handler: &mut WriteHandler<BufWriter<WriteHalf<'_>>>,
+    write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), WriteBranchError> {

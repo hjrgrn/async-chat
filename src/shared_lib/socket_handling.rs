@@ -41,6 +41,7 @@ pub const SEQ_NUM_SIZE: usize = 10;
 /// It takes care also of encryption and message integrity.
 /// It acts differently based on the presence of a `cipher`
 /// in its fields.
+// TODO: review
 pub struct RecvHandler<T: AsyncRead + Unpin + Send> {
     cursor: usize,
     buffer: [u8; CIPTEXT_W_NONCE_SIZE_AND_HASH],
@@ -260,6 +261,7 @@ impl Debug for RecvHandlerError {
 /// It takes care also of encryption and message integrity.
 /// It acts differently based on the presence of a `cipher`
 /// in its fields.
+// TODO: review
 pub struct WriteHandler<T: AsyncWrite + Unpin + Send> {
     cursor: usize,
     buffer: [u8; PLAIN_PACKET_SIZE],

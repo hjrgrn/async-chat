@@ -3,7 +3,7 @@ use std::{env, error::Error, net::Ipv4Addr};
 use config::Config;
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Settings {
     addr: Ipv4Addr,
     port: u16,
@@ -20,7 +20,10 @@ impl Settings {
 }
 
 pub fn get_settings() -> Result<Settings, Box<dyn Error>> {
-    let path = env::current_dir()?.join("configuration").join("ServerSettings.toml");
+    // TODO: a proper config path.
+    let path = env::current_dir()?
+        .join("configuration")
+        .join("ServerSettings.toml");
     let settings = Config::builder()
         .add_source(config::File::from(path))
         .build()?;
