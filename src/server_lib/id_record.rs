@@ -24,10 +24,8 @@ mod utils;
 
 /// # id_record
 ///
-/// This function keeps track of the number of clients connected at a given time. It communicates,
-/// via appropriate channels, with the main task and with
-/// `crate::lib::server_lib::connection_handling::connection_handler`.
-/// It accepts requests and responds with data regarding currently connected clients.
+/// This function handles clients.
+/// It communicates, via appropriate channels, with the main task and with `connection_handler`s.
 /// Through this, the administrator can send messages to other clients or commands to the server.
 ///
 /// ## Notes
@@ -46,7 +44,6 @@ mod utils;
 /// - `output_tx`: Channel used to send server output to a third entity.
 /// - `stdin_req_tx`: Channel used to request information from stdin via `StdinRequest`.
 /// - `ctoken`: Cancellation token used to signal shutdown.
-// XXX: id_record will handle the entire process of accepting a new client from a stream
 #[allow(clippy::too_many_arguments)] // TODO: solve this
 #[tracing::instrument(name = "Id record thread is running", skip_all)]
 pub async fn id_record(
@@ -54,14 +51,13 @@ pub async fn id_record(
     mut run_com_rx: Receiver<RunIdRecordMsg>,
     mut con_hand_id_rx: Receiver<ConnHandlerIdRecordMsg>,
     con_hand_id_tx: Sender<ConnHandlerIdRecordMsg>,
-    server_address: SocketAddr,
     output_tx: mpsc::Sender<OutputMsg>,
     stdin_req_tx: mpsc::Sender<StdinRequest>,
     ctoken: CancellationToken,
     shared_secret: SecretString,
 ) {
     let max_connections = settings.get_max_connections();
-    let addr: SocketAddr = match settings.get_full_address().parse() {
+    let server_address: SocketAddr = match settings.get_full_address().parse() {
         Ok(a) => a,
         Err(e) => {
             let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;

@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use secrecy::SecretString;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -55,20 +53,11 @@ pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
     // Run to id_record.
     let (run_id_com_tx, run_id_com_rx) = mpsc::channel::<RunIdRecordMsg>(10);
 
-    let server_address: SocketAddr = match settings.get_full_address().parse() {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-            return;
-        }
-    };
-
     tokio::spawn(id_record(
         settings.clone(),
         run_id_com_rx,
         con_hand_id_rx,
         con_hand_id_tx,
-        server_address,
         output_tx.clone(),
         stdin_req_tx.clone(),
         ctoken.clone(),
