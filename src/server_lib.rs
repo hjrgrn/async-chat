@@ -95,30 +95,19 @@ pub async fn run_wrapper(settings: Settings, shared_secret: SecretString) {
 
 /// # Run
 ///
-/// Runs the server, listens from incoming connection, if there is space for a connection spawns a
-/// `connection_handler` specific for the connection.
-/// A Sender of the type `mpsc::Sender<OutputMsg>` is used to communicate with the
-/// function that displays the content.
-/// Spawns the task `id_record`, that handles the clients connected.
-///
+/// Runs the server, listens from incoming connection. When a connection request is received the
+/// function passes the connection handling logic to `id_record`.
 ///
 /// ## Parameters
 ///
-/// - `con_hand_id_tx`: sender channel used to communicate with `id_record`, the user manager: connection_handler to
-/// id_record.
-/// - `con_hand_id_rx`: receiver channel used to communicate with id_record: connection_handler
-/// to id_record
-/// - `output_tx`: this channel is used to send the output of the server to a third entity.
-/// - `stdin_req_tx`: channel used to request information from stdin through `StdinRequest`.
-/// - `ctoken`: Cancellation token used to communicate the shutdown
-/// - `shared_secret`: Secret needed for authenticate the users during handshake.
-/// XXX: run will not handle handshake and spawn connection handlers anymore, it passes everything
-/// to id_record
+/// - `settings`: application settings
+/// - `run_id_com_tx`: sender channel used to communicate with `id_record`.
+/// - `output_tx`: this channel is used to send the output of the server to a
+///   output handler.
 #[tracing::instrument(name = "Server is running", skip_all)]
 async fn run(
     settings: Settings,
     run_id_com_tx: mpsc::Sender<RunIdRecordMsg>,
-    // id_run_com_rx: mpsc::Receiver<IdRecordRunMsg>, // XXX: probably not useful anymore
     output_tx: mpsc::Sender<OutputMsg>,
 ) -> Result<(), anyhow::Error> {
     output_tx.send(OutputMsg::new("Listening...")).await?;

@@ -134,17 +134,6 @@ pub fn print_list(clients: &[Client]) -> String {
 /// - `output_tx`: Channel to send output to the displayer.
 /// - `stdin_req_tx`: Channel to send requests to the stdin handler.
 // TODO: refactor, telemetry
-// IDEA: this function doesn't check if there is space, that is handled by `run`: `run` asks
-// if there is space, after that it launches the connection_handler_wrapper. connection_handler_wrapper
-// ask for acceptance using an `ConnHandlerIdRecordMsg::AcceptanceRequest`, but it doesn't check
-// if there is space, in the meantime run may have asked if there is space again for another
-// connection, and another client may have asked for acceptance. I think there is a race condition.
-// A possible solution could be to keep track of the actual number of connections instead of relying
-// on `clients.len()` in `id_record` but this seems weak. I think the best solution would be to
-// id_records to handle the connection handling sequentially, instead of run.
-//
-// there may be a
-// race condition.
 pub async fn receiving_from_hand(
     msg: ConnHandlerIdRecordMsg,
     clients: &mut Vec<Client>,
