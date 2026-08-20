@@ -11,12 +11,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    globals::{KICK, SERVER_COM, SERVER_LIST},
     server_lib::{
         connection_handling::{
             connection_handler_wrapper, handshaking::HandshakeError, utils::handshake_wrapper,
         },
-        structs::{CommandFromIdRecord, IdRecordConnHandler},
+        structs::{Command, CommandFromIdRecord, IdRecordConnHandler},
         OutputMsg, StdinRequest,
     },
     shared_lib::socket_handling::{RecvHandler, WriteHandler},
@@ -46,6 +45,7 @@ use crate::server_lib::structs::{Client, ConnHandlerIdRecordMsg, Message, RunIdR
 /// - shared_secret: Secret needed for authenticate the users during handshake.
 // NOTE: if new vairants of `RunIdRecordMsg` are added, the return value `Err(HandshakeError)` will
 // have to be changed.
+#[allow(clippy::too_many_arguments)]
 pub async fn receiving_from_run(
     clients: &mut [Client],
     msg: RunIdRecordMsg,
@@ -76,7 +76,7 @@ pub async fn receiving_from_run(
                 &mut write_handler,
                 &mut read_handler,
                 &addr,
-                &shared_secret,
+                shared_secret.clone(),
             )
             .await?;
 
@@ -109,7 +109,7 @@ pub async fn receiving_from_run(
 /// ## Returns
 /// `String` -> formatted list of active clients.
 /// IDEA: keep the state of `clients` and update it every time a client arrives/leaves
-/// istead of running this every time
+/// istead of running this every time.
 pub fn print_list(clients: &[Client]) -> String {
     let mut content = String::from("\n\x1b[32;1mClients:\x1b[0m\n");
     for client in clients.iter() {
@@ -133,7 +133,7 @@ pub fn print_list(clients: &[Client]) -> String {
 /// - `con_hand_tx`: Channel to send messages to the `connection_handler`.
 /// - `output_tx`: Channel to send output to the displayer.
 /// - `stdin_req_tx`: Channel to send requests to the stdin handler.
-// TODO: refactor, telemetry
+// TODO: refactor
 pub async fn receiving_from_hand(
     msg: ConnHandlerIdRecordMsg,
     clients: &mut Vec<Client>,
@@ -147,6 +147,7 @@ pub async fn receiving_from_hand(
         ConnHandlerIdRecordMsg::ClientLeft(addr) => {
             for i in 0..clients.len() {
                 if clients[i].addr == addr {
+                    clients.remove(i);
                     output_tx
                         .send(OutputMsg::new(format!(
                             "{} {} has left the chat.\n",
@@ -158,34 +159,14 @@ pub async fn receiving_from_hand(
                         content,
                         address: addr,
                     })?;
-                    clients.remove(i);
                     break;
                 }
             }
-        }
-        // client acceptance
-        ConnHandlerIdRecordMsg::AcceptanceRequest(new_client) => {
-            let mut accepted = true;
-            for client in clients.iter() {
-                if new_client.nick == client.nick {
-                    accepted = false;
-                    break;
-                }
-                if new_client.addr == client.addr {
-                    accepted = false;
-                    break;
-                }
-            }
-            new_client
-                .channel
-                .send(IdRecordConnHandler::Acceptance(accepted))
-                .await?;
 
-            if accepted {
-                clients.push(new_client);
-            }
+            // TODO: a connection handler sent a request to remove a client that is not
+            // present, what do we do now?
         }
-        // a client has requested a list clients
+        // A client has requested a list clients
         ConnHandlerIdRecordMsg::List(addr) => {
             let content = print_list(clients);
             let msg = IdRecordConnHandler::List(content);
@@ -206,55 +187,45 @@ pub async fn receiving_from_hand(
 
 /// # `receiving_from_hand`'s helper, `parse_command`
 ///
-/// Parses a message received from a `connection_handler` that is a command from `server_commands`
-/// and acts accordingly.
+/// Parses a command received the server's `connection_handler`, and acts
+/// accordingly.
 ///
 ///
 /// ## Parameters
 ///
-/// `msg`: message to be parsed
-/// `clients`: list of the connected clients
-/// `address`: address of the app
-/// `con_hand_tx`: channel used to send messages to `connection_handler`
-/// `output_tx`: channel used for sending somethign to be displayed to the displayer
-/// `stdin_req_tx`: channel used to request input from stdin
-/// TODO: telemetry
+/// `msg`: Command to be parsed.
+/// `clients`: List of the connected clients.
+/// `address`: Address of the app.
+/// `con_hand_tx`: Channel used to send messages to `connection_handler`.
+/// `output_tx`: Channel used for sending somethign to be displayed to the displayer.
+/// `stdin_req_tx`: Channel used to request input from stdin.
 async fn parse_command(
-    msg: &String,
+    cmd: &Command,
     clients: &mut [Client],
     address: &SocketAddr,
     con_hand_tx: &broadcast::Sender<Message>,
     output_tx: &mpsc::Sender<OutputMsg>,
     stdin_req_tx: &mpsc::Sender<StdinRequest>,
 ) -> Result<(), anyhow::Error> {
-    // All commands start with '&'
-    if msg.chars().next().expect("this should not happen") == '&' {
-        // command for client
-        if msg == SERVER_LIST {
+    match cmd {
+        Command::ServerList => {
             output_tx.send(OutputMsg::new(print_list(clients))).await?;
-        } else if msg == KICK {
-            kick_user(clients, output_tx, stdin_req_tx).await?;
-        } else {
-            output_tx
-                .send(OutputMsg::new_error(format!(
-                    "Invalid command, type \"{}\" for displaying the avaible commands.",
-                    SERVER_COM.trim()
-                )))
-                .await?;
         }
-    } else {
-        // message for clients
-        let content = format!("master: {}", msg);
-        let m = Message::Broadcast {
-            content,
-            address: *address,
-        };
-        con_hand_tx.send(m)?;
+        Command::Kick => {
+            kick_user(clients, output_tx, stdin_req_tx).await?;
+        }
+        Command::Msg(s) => {
+            let content = format!("master: {}", s);
+            let m = Message::Broadcast {
+                content,
+                address: *address,
+            };
+            con_hand_tx.send(m)?;
+        }
     }
     Ok(())
 }
 
-/// TODO: telemetry
 /// # `parse_command`'s helper `kick_user`
 ///
 /// Asks the admin what client he wants to remove, communicates the choice to the connection
@@ -266,6 +237,7 @@ async fn parse_command(
 /// - clients -> list of clients that are connected
 /// - `output_tx` -> communicates with the application that displays the output
 /// - `stdin_req_tx` -> channel for requiring informations from stdin
+// TODO: It may be better to have this non-interactive. telemetry.
 async fn kick_user(
     clients: &mut [Client],
     output_tx: &mpsc::Sender<OutputMsg>,

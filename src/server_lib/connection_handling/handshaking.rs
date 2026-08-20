@@ -58,7 +58,7 @@ pub async fn handshake(
     write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     addr: &SocketAddr,
-    shared_secret: &SecretString,
+    shared_secret: SecretString,
 ) -> Result<
     (
         Client,
@@ -141,7 +141,7 @@ pub async fn handshake(
 async fn key_exchange(
     write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
-    shared_secret: &SecretString,
+    shared_secret: SecretString,
 ) -> Result<(), HandshakeError> {
     let mut hmac = Hmac::<Sha256>::new_from_slice(shared_secret.expose_secret().as_bytes())
         .map_err(|e| HandshakeError::NonFatal(e.into()))?;

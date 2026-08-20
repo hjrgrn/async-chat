@@ -69,7 +69,7 @@ pub async fn handshake_wrapper(
     write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     addr: &SocketAddr,
-    shared_secret: &SecretString,
+    shared_secret: SecretString,
 ) -> Result<
     (
         Client,
@@ -209,10 +209,6 @@ async fn read_branch_n(
                     match list {
                         IdRecordConnHandler::List(s) => {
                             content = s;
-                        }
-                        _other => {
-                            // `id_record` should always respond with a `List` variant here.
-                            return Err(ReadBranchError::Fatal(anyhow::anyhow!("Unexpecte behaviour from `id_record`:\nIt responded with a non `IdRecordConnHandler::List` to a request for a list.")));
                         }
                     };
                     let msg = Message::Personal {

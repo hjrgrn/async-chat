@@ -114,7 +114,6 @@ pub async fn id_record(
                         break;
                     }
                 };
-                // FROMHERE: refactor from here
                 match receiving_from_hand(msg, &mut clients, &server_address, &int_com_con_hand_tx, &output_tx, &stdin_req_tx).await {
                     Ok(()) => {}
                     Err(e) => {

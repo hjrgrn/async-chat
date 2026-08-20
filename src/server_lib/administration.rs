@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::globals::{COMMANDS, SERVER_COM};
+use crate::server_lib::structs::Command;
 use crate::shared_lib::{OutputMsg, StdinRequest};
 
 use super::ConnHandlerIdRecordMsg;
@@ -138,7 +139,8 @@ async fn server_commands(
                         None => {
                             // There are no requests pending, so this must be the admin wanting to
                             // send a command.
-                            let msg = ConnHandlerIdRecordMsg::ServerCommand(content.clone());
+                            let msg =
+                                ConnHandlerIdRecordMsg::ServerCommand(Command::from_str(&content));
                             if comm_tx.send(msg).await.is_err() {
                                 break 'outer;
                             }
