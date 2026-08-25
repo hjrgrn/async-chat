@@ -3,15 +3,19 @@
 //! Set of functions relative to the handling of the incoming connections
 
 use std::net::SocketAddr;
+
+use anyhow::Result as AnyResult;
 use tokio::io::{BufReader, BufWriter};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use utils::{ReadBranchError, WriteBranchError};
 
-use crate::server_lib::connection_handling::utils::{read_branch, write_branch};
+use crate::server_lib::connection_handling::utils::{
+    handle_id_record_command, read_branch, write_branch,
+};
 use crate::server_lib::structs::{CommandFromIdRecord, IdRecordConnHandler};
 use crate::shared_lib::socket_handling::{RecvHandler, WriteHandler};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::structs::{ConnHandlerIdRecordMsg, Message};
 use super::OutputMsg;
@@ -67,14 +71,15 @@ pub async fn connection_handler_wrapper(
 ///
 /// ## Parameters
 ///
-/// - mut stream: stream between the client and the server
-/// - addr: address of the client
-/// - int_com_tx: channel for communication internale to the handler, transmitter
-/// - mut int_com_rx: channel for communication internale to the handler, receiver
-/// - id_tx: channel for communication with id_record, transmitter
-/// - output_tx: output channel
-/// - `shared_secret` -> Secret needed for authenticate the users during handshake.
-// XXX: comment
+/// - nick: Nickname of the client.
+/// - addr: Address of the client.
+/// - int_com_tx: Channel for internal communication with handler, transmitter.
+/// - int_com_rx: Channel for internal communication with handler, receiver.
+/// - id_tx: Channel for communication with id_record, transmitter.
+/// - output_tx: Output channel.
+/// - write_handler: Write part of the TCP connection with client.
+/// - read_handler: Read part of the TCP connection with client.
+/// XXX: id_hand_rx, command_rx, probably one of the is redundant
 #[tracing::instrument(
     name = "Handling connection.",
     skip_all,
@@ -95,7 +100,7 @@ async fn connection_handler(
     mut read_handler: RecvHandler<BufReader<OwnedReadHalf>>,
     mut id_hand_rx: mpsc::Receiver<IdRecordConnHandler>,
     mut command_rx: mpsc::Receiver<CommandFromIdRecord>,
-) -> Result<(), anyhow::Error> {
+) -> AnyResult<()> {
     // buffers
     let mut line = String::new();
 
@@ -103,38 +108,7 @@ async fn connection_handler(
         tokio::select! {
             // commands form `id_record`
             opt = command_rx.recv() => {
-                match opt {
-                    Some(command) => {
-                        match command {
-                            CommandFromIdRecord::Kick => {
-                                let msg = ConnHandlerIdRecordMsg::ClientLeft(*addr);
-                                match id_tx.send(msg).await{
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                                        return Err(e.into());
-                                    }
-                                };
-                                let content = String::from("Master: You have been kicked.\n");
-                                let personal = Message::Personal {
-                                    content,
-                                    address: *addr
-                                };
-                                match int_com_tx.send(personal) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                                        return Err(e.into());
-                                    }
-                                };
-                                break;
-                            }
-                        }
-                    }
-                    None => {
-                        break;
-                    }
-                }
+                return handle_id_record_command(*addr, id_tx, int_com_tx, &opt, output_tx).await;
             }
             // read from the client
             bytes = read_handler.recv_str(&mut line) => {

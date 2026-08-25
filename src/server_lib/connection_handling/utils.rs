@@ -4,6 +4,7 @@ use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
+use anyhow::Result as AnyResult;
 use secrecy::SecretString;
 use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
@@ -37,7 +38,7 @@ async fn connection_dropped<T: Display>(
     err: Option<T>,
     addr: SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
-) -> Result<(), anyhow::Error> {
+) -> AnyResult<()> {
     match err {
         Some(e) => output_tx.send(OutputMsg::new_error(&e.to_string())).await?,
         None => {}
@@ -344,5 +345,52 @@ pub enum WriteBranchError {
 impl Debug for WriteBranchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         error_chain_fmt(self, f)
+    }
+}
+
+/// `connection_handler`'s helper.
+///
+/// Handles a command coming from ID record.
+// NOTE: at the moment the only possible command is kick. Because of that
+// the moment this function return, the caller can propagate the result
+// without any other passage. It may happen that I add a command that
+// doesn't necessarily needs to end the loop in `connection_handler`,
+// in that case I need to handle the situation, probably by creating
+// a custom error.
+pub async fn handle_id_record_command(
+    address: SocketAddr,
+    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
+    int_com_tx: broadcast::Sender<Message>,
+    opt: &Option<CommandFromIdRecord>,
+    output_tx: mpsc::Sender<OutputMsg>,
+) -> AnyResult<()> {
+    match opt {
+        Some(command) => match command {
+            CommandFromIdRecord::Kick => {
+                let msg = ConnHandlerIdRecordMsg::ClientLeft(address);
+                match id_tx.send(msg).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        return Err(e.into());
+                    }
+                };
+                let content = String::from("Master: You have been kicked.\n");
+                let personal = Message::Personal { content, address };
+                match int_com_tx.send(personal) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        return Err(e.into());
+                    }
+                };
+                return Ok(());
+            }
+        },
+        None => {
+            // TODO: In this case the channel has been closed, test to see if
+            // this has been communicated. If not, communicate it.
+            return Ok(());
+        }
     }
 }
