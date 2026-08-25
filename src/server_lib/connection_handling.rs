@@ -20,6 +20,8 @@ pub mod handshaking;
 pub mod utils;
 
 /// `connection_handler`'s wrapper
+// FROMHERE: refactor from here
+#[allow(clippy::too_many_arguments)] // TODO: maybe do something about it
 pub async fn connection_handler_wrapper(
     nick: String,
     addr: SocketAddr,
@@ -82,6 +84,7 @@ pub async fn connection_handler_wrapper(
         address = %addr
     )
 )]
+#[allow(clippy::too_many_arguments)] // TODO: maybe do something about it
 async fn connection_handler(
     nick: &str,
     addr: &SocketAddr,
@@ -105,7 +108,7 @@ async fn connection_handler(
                     Some(command) => {
                         match command {
                             CommandFromIdRecord::Kick => {
-                                let msg = ConnHandlerIdRecordMsg::ClientLeft(addr.clone());
+                                let msg = ConnHandlerIdRecordMsg::ClientLeft(*addr);
                                 match id_tx.send(msg).await{
                                     Ok(_) => {}
                                     Err(e) => {
@@ -116,7 +119,7 @@ async fn connection_handler(
                                 let content = String::from("Master: You have been kicked.\n");
                                 let personal = Message::Personal {
                                     content,
-                                    address: addr.clone()
+                                    address: *addr
                                 };
                                 match int_com_tx.send(personal) {
                                     Ok(_) => {}
@@ -140,10 +143,10 @@ async fn connection_handler(
                     bytes,
                     &mut line,
                     &id_tx,
-                    &addr,
+                    addr,
                     &mut id_hand_rx,
                     &int_com_tx,
-                    &nick,
+                    nick,
                     output_tx.clone(),
                 ).await {
                     Ok(_) => {},
@@ -168,7 +171,7 @@ async fn connection_handler(
 
             // sends content to the client
             res = int_com_rx.recv() => {
-                match write_branch(res, &addr, &mut write_handler, &id_tx, output_tx.clone()).await {
+                match write_branch(res, addr, &mut write_handler, &id_tx, output_tx.clone()).await {
                     Ok(_) => {}
                     Err(e) => {
                         match e {
