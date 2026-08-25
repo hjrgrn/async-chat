@@ -20,7 +20,6 @@ pub mod handshaking;
 pub mod utils;
 
 /// `connection_handler`'s wrapper
-// FROMHERE: refactor from here
 #[allow(clippy::too_many_arguments)] // TODO: maybe do something about it
 pub async fn connection_handler_wrapper(
     nick: String,
