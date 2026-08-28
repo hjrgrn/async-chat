@@ -107,8 +107,8 @@ async fn connection_handler(
     loop {
         tokio::select! {
             // commands form `id_record`
-            opt = command_rx.recv() => {
-                return handle_id_record_command(*addr, id_tx, int_com_tx, &opt, output_tx).await;
+            id_command = command_rx.recv() => {
+                return handle_id_record_command(*addr, id_tx, int_com_tx, &id_command, output_tx).await;
             }
             // read from the client
             bytes = read_handler.recv_str(&mut line) => {

@@ -74,8 +74,8 @@ pub async fn id_record(
     loop {
         tokio::select! {
             // Receiving from run task.
-            opt = run_com_rx.recv() => {
-                let msg = match opt {
+            run_msg = run_com_rx.recv() => {
+                let msg = match run_msg {
                     Some(m) => {m},
                     None => {
                         let msg = "id_record is unable to communicate with `run`";
@@ -104,8 +104,8 @@ pub async fn id_record(
                 };
             }
             // Receiving from a connection handler.
-            opt = con_hand_id_rx.recv() => {
-                let msg = match opt {
+            conn_hand_msg = con_hand_id_rx.recv() => {
+                let msg = match conn_hand_msg {
                     Some(m) => {m}
                     None => {
                         let msg = "id_record is unable to communicate with a connection handler";
