@@ -112,6 +112,7 @@ async fn connection_handler(
             }
             // read from the client
             bytes = read_handler.recv_str(&mut line) => {
+                // FROMHERE: refactor
                 match read_branch(
                     bytes,
                     &mut line,
