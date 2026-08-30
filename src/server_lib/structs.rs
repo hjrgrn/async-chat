@@ -5,6 +5,8 @@
 use std::net::SocketAddr;
 use tokio::{net::TcpStream, sync::mpsc};
 
+use crate::globals::{KICK, LIST};
+
 /// # `RunIdRecordMsg`
 ///
 /// Message that is sent from `crate::server_lib::run` to
@@ -28,9 +30,29 @@ pub enum IdRecordRunMsg {
 #[derive(Debug)]
 pub enum ConnHandlerIdRecordMsg {
     ClientLeft(SocketAddr),
-    AcceptanceRequest(Client),
     List(SocketAddr),
-    ServerCommand(String),
+    ServerCommand(Command),
+}
+
+/// XXX: domain.
+#[derive(Debug)]
+pub enum Command {
+    ServerList,
+    Kick,
+    Msg(String),
+}
+
+// TODO: proper from
+impl Command {
+    pub fn from_str(s: &str) -> Command {
+        if s == KICK {
+            return Command::Kick;
+        } else if s == LIST {
+            return Command::ServerList;
+        } else {
+            return Command::Msg(s.into());
+        }
+    }
 }
 
 /// # `ConnHandlerIdRecordMsg`
@@ -39,7 +61,6 @@ pub enum ConnHandlerIdRecordMsg {
 /// `crate::server_lib::connection_handling::connection_handler`
 #[derive(Debug)]
 pub enum IdRecordConnHandler {
-    Acceptance(bool),
     List(String),
 }
 

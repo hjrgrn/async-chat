@@ -99,7 +99,7 @@ async fn run(
         &mut read_handler,
         &mut stdin_req_tx,
         &mut output_tx,
-        shared_secret
+        shared_secret,
     )
     .await
     {

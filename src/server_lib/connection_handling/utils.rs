@@ -4,6 +4,7 @@ use crate::server_lib::OutputMsg;
 use crate::shared_lib::auxiliaries::error_chain_fmt;
 use crate::shared_lib::socket_handling::{RecvHandler, RecvHandlerError, WriteHandler};
 use anyhow::anyhow;
+use anyhow::Result as AnyResult;
 use secrecy::SecretString;
 use std::fmt::{Debug, Display};
 use std::net::SocketAddr;
@@ -34,13 +35,12 @@ use super::handshaking::HandshakeError;
 /// - `output_tx`: channel to output on the server side
 async fn connection_dropped<T: Display>(
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
-    err: Option<T>,
+    err_msg: Option<T>,
     addr: SocketAddr,
     output_tx: &mpsc::Sender<OutputMsg>,
-) -> Result<(), anyhow::Error> {
-    match err {
-        Some(e) => output_tx.send(OutputMsg::new_error(&e.to_string())).await?,
-        None => {}
+) -> AnyResult<()> {
+    if let Some(e) = err_msg {
+        output_tx.send(OutputMsg::new_error(e.to_string())).await?;
     }
     // update id_record
     id_tx.send(ConnHandlerIdRecordMsg::ClientLeft(addr)).await?;
@@ -69,7 +69,7 @@ pub async fn handshake_wrapper(
     write_handler: &mut WriteHandler<BufWriter<OwnedWriteHalf>>,
     read_handler: &mut RecvHandler<BufReader<OwnedReadHalf>>,
     addr: &SocketAddr,
-    shared_secret: &SecretString,
+    shared_secret: SecretString,
 ) -> Result<
     (
         Client,
@@ -82,12 +82,12 @@ pub async fn handshake_wrapper(
     tokio::select! {
         // getting the nickname
         res = handshake(clients, write_handler, read_handler, addr, shared_secret) => {
-            return res;
+            res
         }
         // timer
         _ = time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT)) => {
             let _ = write_handler.write_str(TIMEOUT).await;
-            return Err(HandshakeError::NonFatal(anyhow!("Handshake failed becouse timeout has been reached.")));
+            Err(HandshakeError::NonFatal(anyhow!("Handshake failed becouse timeout has been reached.")))
         }
     }
 }
@@ -111,6 +111,7 @@ pub async fn handshake_wrapper(
 /// - `nick`: nickname of the client
 /// - `output_tx`: communicates eventual outputs
 /// - `ctoken`: cancellation token
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "Reading from connection",
     skip(bytes, line, id_tx, id_hand_rx, int_com_tx, nick, output_tx)
@@ -136,21 +137,21 @@ pub async fn read_branch(
                 RecvHandlerError::ConnectionInterrupted => {
                     // connection has been closed by the client
                     let e: Option<RecvHandlerError> = None;
-                    connection_dropped(&id_tx, e, addr.clone(), &output_tx)
+                    connection_dropped(id_tx, e, *addr, &output_tx)
                         .await
-                        .map_err(|e| ReadBranchError::Fatal(e))?;
+                        .map_err(ReadBranchError::Fatal)?;
                     res = Err(ReadBranchError::NonFatal(err.into()));
                 }
                 RecvHandlerError::MalformedPacket(_)
                 | RecvHandlerError::IoError(_)
                 | RecvHandlerError::EncryptionError(_) => {
-                    connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx)
+                    connection_dropped(id_tx, Some(&err), *addr, &output_tx)
                         .await
-                        .map_err(|e| ReadBranchError::Fatal(e))?;
+                        .map_err(ReadBranchError::Fatal)?;
                     res = Err(ReadBranchError::NonFatal(err.into()));
                 }
                 RecvHandlerError::HmacError(ref e) => {
-                    let _ = connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx).await;
+                    let _ = connection_dropped(id_tx, Some(&err), *addr, &output_tx).await;
                     res = Err(ReadBranchError::Fatal(anyhow::anyhow!(
                         "This is a fatal error that shouldn't have happended:\n{}",
                         e
@@ -172,11 +173,12 @@ pub async fn read_branch(
 /// ## Parameters
 ///
 /// - `line`: line to be sent to the `connection_handler` branch that sends stuff to the client
-/// - `id_tx`: sends informations to `id_record`
-/// - `id_hand_rx`: receives informations from `id_record`
+/// - `id_tx`: sends information to `id_record`
+/// - `id_hand_rx`: receives information from `id_record`
 /// - `int_com_tx`: sends `line` to `connection_handler`
 /// - `addr`: address of the client
 /// - `nick`: nickname of the client
+/// - `output_tx`: output channel
 async fn read_branch_n(
     line: &str,
     id_tx: &mpsc::Sender<ConnHandlerIdRecordMsg>,
@@ -186,71 +188,47 @@ async fn read_branch_n(
     nick: &str,
     output_tx: &mpsc::Sender<OutputMsg>,
 ) -> Result<(), ReadBranchError> {
-    match line.chars().nth(0) {
-        Some(n) => {
-            if n == '&' {
-                if line == LIST {
-                    let req = ConnHandlerIdRecordMsg::List(addr.clone());
-                    match id_tx.send(req).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e.to_string())));
-                        }
-                    };
-                    let list = match id_hand_rx.recv().await {
-                        Some(l) => l,
-                        None => {
-                            let e = "Failed to receive from `id_record` in `read_branch_n`";
-                            let _ = output_tx.send(OutputMsg::new_error(&e)).await;
-                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
-                        }
-                    };
-                    let content;
-                    match list {
-                        IdRecordConnHandler::List(s) => {
-                            content = s;
-                        }
-                        _other => {
-                            // `id_record` should always respond with a `List` variant here.
-                            return Err(ReadBranchError::Fatal(anyhow::anyhow!("Unexpecte behaviour from `id_record`:\nIt responded with a non `IdRecordConnHandler::List` to a request for a list.")));
-                        }
-                    };
-                    let msg = Message::Personal {
-                        content,
-                        address: addr.clone(),
-                    };
-                    match int_com_tx.send(msg) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
-                            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
-                        }
-                    };
-                }
-            } else {
-                // regular message
-                let msg = format!("{}: {}", nick, line);
-                match output_tx.send(OutputMsg::new(&msg)).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
-                    }
-                };
-                // send the line to the branch that communicates
-                // with the clinet
-                let msg = Message::Broadcast {
-                    content: msg,
-                    address: addr.clone(),
-                };
-                match int_com_tx.send(msg) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
-                    }
-                }
-            }
+    if line == LIST {
+        // List command.
+        let req = ConnHandlerIdRecordMsg::List(*addr);
+        if let Err(e) = id_tx.send(req).await {
+            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e.to_string())));
         }
-        None => {}
+        let Some(list) = id_hand_rx.recv().await else {
+            let e = "Failed to receive from `id_record` in `read_branch_n`";
+            let _ = output_tx.send(OutputMsg::new_error(e)).await;
+            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+        };
+        #[allow(clippy::needless_late_init)]
+        let content;
+        match list {
+            IdRecordConnHandler::List(s) => {
+                content = s;
+            }
+        };
+        let msg = Message::Personal {
+            content,
+            address: *addr,
+        };
+        if let Err(e) = int_com_tx.send(msg) {
+            let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+        }
+    } else {
+        // Regular message.
+        let msg = format!("{}: {}", nick, line);
+        if let Err(e) = output_tx.send(OutputMsg::new(&msg)).await {
+            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+        }
+        // Send the line to the branch that communicates
+        // with the client.
+        let msg = Message::Broadcast {
+            content: msg,
+            address: *addr,
+        };
+        if let Err(e) = int_com_tx.send(msg) {
+            return Err(ReadBranchError::Fatal(anyhow::anyhow!(e)));
+        }
     }
 
     Ok(())
@@ -289,9 +267,9 @@ pub async fn write_branch(
                     match write_handler.write_str(&content).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)
+                            connection_dropped(id_tx, Some(&e), *addr, &output_tx)
                                 .await
-                                .map_err(|e| WriteBranchError::Fatal(e))?;
+                                .map_err(WriteBranchError::Fatal)?;
                             return Err(WriteBranchError::NonFatal(e.into()));
                         }
                     }
@@ -302,9 +280,9 @@ pub async fn write_branch(
                     match write_handler.write_str(&content).await {
                         Ok(_) => return Ok(()),
                         Err(e) => {
-                            connection_dropped(id_tx, Some(&e), addr.clone(), &output_tx)
+                            connection_dropped(id_tx, Some(&e), *addr, &output_tx)
                                 .await
-                                .map_err(|e| WriteBranchError::Fatal(e))?;
+                                .map_err(WriteBranchError::Fatal)?;
                             return Err(WriteBranchError::NonFatal(e.into()));
                         }
                     }
@@ -314,9 +292,9 @@ pub async fn write_branch(
         // `int_com_rx` and `int_com_tx` have dropped, so it means the future
         // `connection_handler` has returned, so this should not happen
         Err(err) => {
-            connection_dropped(&id_tx, Some(&err), addr.clone(), &output_tx)
+            connection_dropped(id_tx, Some(&err), *addr, &output_tx)
                 .await
-                .map_err(|e| WriteBranchError::Fatal(e))?;
+                .map_err(WriteBranchError::Fatal)?;
             return Err(WriteBranchError::NonFatal(err.into()));
         }
     }
@@ -348,5 +326,52 @@ pub enum WriteBranchError {
 impl Debug for WriteBranchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         error_chain_fmt(self, f)
+    }
+}
+
+/// `connection_handler`'s helper.
+///
+/// Handles a command coming from ID record.
+// NOTE: at the moment the only possible command is kick. Because of that
+// the moment this function return, the caller can propagate the result
+// without any other passage. It may happen that I add a command that
+// doesn't necessarily needs to end the loop in `connection_handler`,
+// in that case I need to handle the situation, probably by creating
+// a custom error.
+pub async fn handle_id_record_command(
+    address: SocketAddr,
+    id_tx: mpsc::Sender<ConnHandlerIdRecordMsg>,
+    int_com_tx: broadcast::Sender<Message>,
+    id_command: &Option<CommandFromIdRecord>,
+    output_tx: mpsc::Sender<OutputMsg>,
+) -> AnyResult<()> {
+    match id_command {
+        Some(command) => match command {
+            CommandFromIdRecord::Kick => {
+                let msg = ConnHandlerIdRecordMsg::ClientLeft(address);
+                match id_tx.send(msg).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        return Err(e.into());
+                    }
+                };
+                let content = String::from("Master: You have been kicked.\n");
+                let personal = Message::Personal { content, address };
+                match int_com_tx.send(personal) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = output_tx.send(OutputMsg::new_error(e.to_string())).await;
+                        return Err(e.into());
+                    }
+                };
+                Ok(())
+            }
+        },
+        None => {
+            // TODO: In this case the channel has been closed, test to see if
+            // this has been communicated. If not, communicate it.
+            Ok(())
+        }
     }
 }
